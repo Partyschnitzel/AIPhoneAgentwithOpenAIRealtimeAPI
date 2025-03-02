@@ -83,7 +83,14 @@ async def handle_media_stream(websocket: WebSocket):
             nonlocal stream_sid, latest_media_timestamp
             try:
                 async for message in websocket.iter_text():
-                    data = json.loads(message)
+                    if not message:
+                        print("Warnung: Leere Nachricht von Twilio erhalten!")
+                        continue  # Leere Nachricht ignorieren
+                    try:
+                        data = json.loads(message)
+                    except json.JSONDecodeError as e:
+                        print(f"JSON-Fehler: {e} - Nachricht: {message}")
+                        continue  # Überspringt fehlerhafte Nachrichten
                     if data['event'] == 'media' and openai_ws.open:
                         latest_media_timestamp = int(data['media']['timestamp'])
                         audio_append = {
