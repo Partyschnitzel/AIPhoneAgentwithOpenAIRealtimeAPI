@@ -109,7 +109,6 @@ async def handle_media_stream(websocket: WebSocket):
                             mark_queue.pop(0)
                     elif data['event'] == 'stop':
                         logger.info("Twilio call ended. Closing connections.")
-                        if openai_ws.open:
                         if openai_ws.state == websockets.protocol.State.OPEN:
                             logger.info("Closing OpenAI WebSocket.")
                             await openai_ws.close()
