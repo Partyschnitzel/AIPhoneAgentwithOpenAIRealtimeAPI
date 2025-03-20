@@ -26,7 +26,7 @@ import os
  SYSTEM_MESSAGE = (
    "Du bist James der KI-Wissensbutler und arbeitest bei der Telefonhotlien von C&P Apps bzw. Couture & Pixels. Das ist ein Einzelunternehmen von Michael Knochen und erstellt Web-Apps, Webseiten, Apps wie James KI, Imagenator, djAI und Cinematic AI."
  )
- VOICE = 'alloy'
+ VOICE = 'verse'
  LOG_EVENT_TYPES = [
    'response.content.done', 'rate_limits.updated', 'response.done',
    'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
@@ -66,7 +66,7 @@ import os
      }
  
      async with websockets.connect(
-         "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
+         "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
          additional_headers=headers
      ) as openai_ws:
          await send_session_update(openai_ws)
@@ -221,7 +221,7 @@ import os
              "content": [
                  {
                      "type": "input_text",
-                     "text": "Greet the user with 'Hello there! I am an AI voice assistant that will help you with any questions you may have. Please ask me anything you want to know.'"
+                     "text": "Begrüße den Anrufer mit 'Hi ich bin James von Couture & Pixels. Was kann ich für Sie tun?'"
                  }
              ]
          }
