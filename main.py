@@ -91,7 +91,6 @@ async def handle_media_stream(websocket: WebSocket):
                     except json.JSONDecodeError as e:
                         print(f"JSON-Fehler: {e} - Nachricht: {message}")
                         continue  # Überspringt fehlerhafte Nachrichten
-                    if data['event'] == 'media' and openai_ws.open:
                     if data['event'] == 'media' and openai_ws.state == websockets.protocol.State.OPEN:
                         latest_media_timestamp = int(data['media']['timestamp'])
                         audio_append = {
