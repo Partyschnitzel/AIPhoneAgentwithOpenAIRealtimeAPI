@@ -171,9 +171,86 @@ async def handle_media_stream(websocket: WebSocket):
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
                     if response['type'] in LOG_EVENT_TYPES:
-                        print(f"Received event: {response['type']}", response)
+                        # Log relevantes für Debugging, aber nicht alles um Logs übersichtlich zu halten
+                         if response['type'] not in ['response.audio.delta']: # Audio Delta ist zu häufig
+                            logger.info(f"Received OpenAI event: {response['type']} - Data: {json.dumps(response)}")
 
-                    if response.get('type') == 'response.audio.delta' and 'delta' in response:
+
+                    # --- NEU: Tool Call Handling ---
+                    if response.get('type') == 'response.content.delta' and 'tool_calls' in response:
+                        logger.info("Detected tool calls request from OpenAI.")
+                        # Der Realtime API sendet Tool Calls oft als Delta, sammle sie ggf. oder handle direkt
+                        # Annahme: Der Tool Call kommt in einer einzigen Nachricht oder wird hier komplettiert
+                        # In der Praxis muss man Deltas evtl. zusammensetzen, aber für einen Call ist das oft nicht nötig.
+                        tool_calls = response.get('tool_calls', [])
+                        tool_results = []
+
+                        for tool_call in tool_calls:
+                             if tool_call.get('type') == 'function':
+                                function_call = tool_call.get('function')
+                                if not function_call: continue
+
+                                tool_call_id = tool_call.get('id')
+                                function_name = function_call.get('name')
+                                arguments_str = function_call.get('arguments') # Argumente kommen als String JSON
+
+                                logger.info(f"Processing tool call ID: {tool_call_id}, Function: {function_name}, Args: {arguments_str}")
+
+                                if function_name == "send_email_summary":
+                                    try:
+                                        arguments = json.loads(arguments_str)
+                                        summary = arguments.get('summary')
+                                        if summary:
+                                            # Führe die Funktion aus (synchron hier, für lange Tasks ggf. async/thread)
+                                            result_message = send_email_summary(summary)
+                                            tool_results.append({
+                                                "type": "tool_result",
+                                                "tool_call_id": tool_call_id,
+                                                "result": result_message
+                                            })
+                                        else:
+                                            logger.warning("Summary argument missing in tool call.")
+                                            tool_results.append({
+                                                "type": "tool_result",
+                                                "tool_call_id": tool_call_id,
+                                                "result": "Error: Missing 'summary' argument."
+                                            })
+                                    except json.JSONDecodeError:
+                                        logger.error(f"Failed to decode arguments JSON for tool call {tool_call_id}: {arguments_str}")
+                                        tool_results.append({
+                                                "type": "tool_result",
+                                                "tool_call_id": tool_call_id,
+                                                "result": "Error: Invalid arguments format."
+                                            })
+                                    except Exception as e:
+                                         logger.error(f"Error executing tool call {tool_call_id}: {e}")
+                                         tool_results.append({
+                                                "type": "tool_result",
+                                                "tool_call_id": tool_call_id,
+                                                "result": f"Error: Exception during function execution - {e}"
+                                            })
+                                else:
+                                    logger.warning(f"Received unhandled tool call function: {function_name}")
+                                    tool_results.append({
+                                        "type": "tool_result",
+                                        "tool_call_id": tool_call_id,
+                                        "result": f"Error: Function '{function_name}' is not implemented."
+                                    })
+
+                        # Sende die Ergebnisse zurück an OpenAI
+                        if tool_results:
+                            tool_results_message = {
+                                "type": "tool_results.create",
+                                "results": tool_results
+                            }
+                            logger.info(f"Sending tool results back to OpenAI: {json.dumps(tool_results_message)}")
+                            await openai_ws.send(json.dumps(tool_results_message))
+                            # Fordere eine neue Antwort von OpenAI an, nachdem die Tools ausgeführt wurden
+                            await openai_ws.send(json.dumps({"type": "response.create"}))
+
+
+                    # --- Bestehende Logik für Audio ---
+                    elif response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
                         audio_delta = {
                             "event": "media",
@@ -245,7 +322,7 @@ async def handle_media_stream(websocket: WebSocket):
                 await connection.send_json(mark_event)
                 mark_queue.append('responsePart')
 
-        await asyncio.gather(receive_from_twilio(), send_to_twilio())
+            await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
 
 async def send_initial_conversation_item(openai_ws):
