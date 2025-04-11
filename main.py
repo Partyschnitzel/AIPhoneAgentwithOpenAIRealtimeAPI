@@ -9,8 +9,6 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 import logging
-import smtplib # Hinzufügen für E-Mail
-from email.mime.text import MIMEText # Hinzufügen für E-Mail Formatierung
 
 print(websockets.__version__)
 
@@ -39,42 +37,6 @@ app = FastAPI()
 if not OPENAI_API_KEY:
   raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 
-# --- NEU: Email Configuration laden ---
-EMAIL_HOST = "mxe956.netcup.net"
-EMAIL_PORT = 587
-EMAIL_USER = "michael@fitbat.de"
-EMAIL_PASSWORD = "ceria6Celia!"
-EMAIL_RECIPIENT = "service@couture-pixels.de"
-# --- Ende NEU ---
-
-def send_email_summary(summary: str) -> str:
-  """Sends an email with the call summary."""
-  if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-      logger.error("Email configuration is incomplete. Cannot send email.")
-      return "Error: Email server not configured."
-  
-  subject = "Zusammenfassung des Anrufs (James KI Butler)"
-  body = f"Hallo,\n\nhier ist die Zusammenfassung des letzten Anrufs:\n\n{summary}\n\nViele Grüße,\nJames KI Butler"
-  
-  msg = MIMEText(body, 'plain', 'utf-8')
-  msg['Subject'] = subject
-  msg['From'] = EMAIL_USER
-  msg['To'] = EMAIL_RECIPIENT
-  
-  try:
-      logger.info(f"Attempting to send email summary to {EMAIL_RECIPIENT}")
-      with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-          server.starttls()  # Secure the connection
-          server.login(EMAIL_USER, EMAIL_PASSWORD)
-          server.sendmail(EMAIL_USER, EMAIL_RECIPIENT, msg.as_string())
-      logger.info("Email summary sent successfully.")
-      return "Email successfully sent."
-  except smtplib.SMTPAuthenticationError as e:
-      logger.error(f"SMTP Authentication Error: {e}. Check email user/password.")
-      return f"Error: SMTP Authentication Failed ({e.smtp_code} - {e.smtp_error})."
-  except Exception as e:
-      logger.error(f"Failed to send email: {e}")
-      return f"Error: Could not send email. Reason: {e}"
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
@@ -173,78 +135,8 @@ async def handle_media_stream(websocket: WebSocket):
                     response = json.loads(openai_message)
                     if response['type'] in LOG_EVENT_TYPES:
                         print(f"Received event: {response['type']}", response)
-                    # --- NEU: Tool Call Handling ---
-                    if response.get('type') == 'response.content.delta' and 'tool_calls' in response:
-                      logger.info("Detected tool calls request from OpenAI.")
-                      # Der Realtime API sendet Tool Calls oft als Delta, sammle sie ggf. oder handle direkt
-                      # Annahme: Der Tool Call kommt in einer einzigen Nachricht oder wird hier komplettiert
-                      # In der Praxis muss man Deltas evtl. zusammensetzen, aber für einen Call ist das oft nicht nötig.
-                      tool_calls = response.get('tool_calls', [])
-                      tool_results = []
 
-                      for tool_call in tool_calls:
-                         if tool_call.get('type') == 'function':
-                            function_call = tool_call.get('function')
-                            if not function_call: continue
-    
-                            tool_call_id = tool_call.get('id')
-                            function_name = function_call.get('name')
-                            arguments_str = function_call.get('arguments') # Argumente kommen als String JSON
-    
-                            logger.info(f"Processing tool call ID: {tool_call_id}, Function: {function_name}, Args: {arguments_str}")
-    
-                            if function_name == "send_email_summary":
-                                try:
-                                    arguments = json.loads(arguments_str)
-                                    summary = arguments.get('summary')
-                                    if summary:
-                                        # Führe die Funktion aus (synchron hier, für lange Tasks ggf. async/thread)
-                                        result_message = send_email_summary(summary)
-                                        tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_call_id": tool_call_id,
-                                            "result": result_message
-                                        })
-                                    else:
-                                        logger.warning("Summary argument missing in tool call.")
-                                        tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_call_id": tool_call_id,
-                                            "result": "Error: Missing 'summary' argument."
-                                        })
-                                except json.JSONDecodeError:
-                                    logger.error(f"Failed to decode arguments JSON for tool call {tool_call_id}: {arguments_str}")
-                                    tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_call_id": tool_call_id,
-                                            "result": "Error: Invalid arguments format."
-                                        })
-                                except Exception as e:
-                                     logger.error(f"Error executing tool call {tool_call_id}: {e}")
-                                     tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_call_id": tool_call_id,
-                                            "result": f"Error: Exception during function execution - {e}"
-                                        })
-                            else:
-                                logger.warning(f"Received unhandled tool call function: {function_name}")
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_call_id": tool_call_id,
-                                    "result": f"Error: Function '{function_name}' is not implemented."
-                                })
-
-                      # Sende die Ergebnisse zurück an OpenAI
-                      if tool_results:
-                          tool_results_message = {
-                              "type": "tool_results.create",
-                              "results": tool_results
-                          }
-                          logger.info(f"Sending tool results back to OpenAI: {json.dumps(tool_results_message)}")
-                          await openai_ws.send(json.dumps(tool_results_message))
-                          # Fordere eine neue Antwort von OpenAI an, nachdem die Tools ausgeführt wurden
-                          await openai_ws.send(json.dumps({"type": "response.create"}))
-                    elif response.get('type') == 'response.audio.delta' and 'delta' in response:
+                    if response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
                         audio_delta = {
                             "event": "media",
@@ -348,25 +240,6 @@ async def send_session_update(openai_ws):
           "instructions": SYSTEM_MESSAGE,
           "modalities": ["text", "audio"],
           "temperature": 0.8,
-          "tools": [
-            {
-            "type": "function",
-            "function": {
-                "name": "send_email_summary",
-                "description": "Sendet eine E-Mail mit der Zusammenfassung des Anrufs an service@couture-pixels.de.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "summary": {
-                            "type": "string",
-                            "description": "Eine prägnante Zusammenfassung des Gesprächs, die per E-Mail gesendet werden soll."
-                        }
-                    },
-                    "required": ["summary"]
-                }
-            }
-          }
-        ]
       }
     }
     print('Sending session update:', json.dumps(session_update))
