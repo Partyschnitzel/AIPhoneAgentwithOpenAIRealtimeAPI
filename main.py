@@ -39,6 +39,14 @@ app = FastAPI()
 if not OPENAI_API_KEY:
   raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 
+# --- NEU: Email Configuration laden ---
+EMAIL_HOST = "mxe956.netcup.net"
+EMAIL_PORT = 587
+EMAIL_USER = "michael@fitbat.de"
+EMAIL_PASSWORD = "ceria6Celia!"
+EMAIL_RECIPIENT = "service@couture-pixels.de"
+# --- Ende NEU ---
+
 def send_email_summary(summary: str) -> str:
   """Sends an email with the call summary."""
   if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
