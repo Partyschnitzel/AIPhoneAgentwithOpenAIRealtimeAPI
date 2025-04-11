@@ -351,8 +351,8 @@ async def send_session_update(openai_ws):
         "type": "session.update",
         "session": {
             "turn_detection": {"type": "server_vad"},
-            "input_audio_format": "opus",
-            "output_audio_format": "opus",
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
             "voice": VOICE,
             "instructions": SYSTEM_MESSAGE + " Am Ende des Gesprächs oder auf Anfrage kannst du anbieten, eine Zusammenfassung per E-Mail an service@couture-pixels.de zu senden, indem du die Funktion 'send_email_summary' nutzt.",
             "modalities": ["text", "audio"],
