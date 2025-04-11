@@ -9,8 +9,6 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 import logging
-import smtplib  # Hinzufügen für E-Mail
-from email.mime.text import MIMEText  # Hinzufügen für E-Mail Formatierung
 
 print(websockets.__version__)
 
@@ -18,37 +16,31 @@ print(websockets.__version__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 load_dotenv()
 # Configuration
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')  # requires OpenAI Realtime API Access
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY') # requires OpenAI Realtime API Access
 PORT = int(os.getenv('PORT', 5050))
-# Email Configuration
-EMAIL_HOST = "mxe8b4.netcup.net"  # z.B. smtp.gmail.com
-EMAIL_PORT = "587"  # Standard TLS Port
-EMAIL_USER = "service@couture-pixels.de"
-EMAIL_PASSWORD = "qiqwoj-webqat-berQe6"
-EMAIL_RECIPIENT = "service@couture-pixels.de"
+
 
 SYSTEM_MESSAGE = (
-    "Du bist James der KI-Wissensbutler und arbeitest bei der Telefonhotlien von C&P Apps bzw. Couture & Pixels. Das ist ein Einzelunternehmen von Michael Knochen und erstellt Web-Apps, Webseiten, Apps wie James KI, Imagenator, djAI und Cinematic AI."
+  "You are a helpful and bubbly AI assistant who answers any questions I ask"
 )
-VOICE = 'verse'
+VOICE = 'alloy'
 LOG_EVENT_TYPES = [
-    'response.content.done', 'rate_limits.updated', 'response.done',
-    'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
-    'input_audio_buffer.speech_started', 'response.create', 'session.created'
+  'response.content.done', 'rate_limits.updated', 'response.done',
+  'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
+  'input_audio_buffer.speech_started', 'response.create', 'session.created'
 ]
 SHOW_TIMING_MATH = False
 app = FastAPI()
 if not OPENAI_API_KEY:
-    raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
+  raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
     return "<html><body><h1>Twilio Media Stream Server is running!</h1></body></html>"
-
-
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
     """Handle incoming call and return TwiML response to connect to Media Stream."""
@@ -67,15 +59,15 @@ async def handle_media_stream(websocket: WebSocket):
     """Handle WebSocket connections between Twilio and OpenAI."""
     print("Client connected")
     await websocket.accept()
-
+  
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1"
     }
-
+  
     async with websockets.connect(
-            "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
-            additional_headers=headers
+        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
+        additional_headers=headers
     ) as openai_ws:
         await send_session_update(openai_ws)
 
@@ -85,35 +77,6 @@ async def handle_media_stream(websocket: WebSocket):
         last_assistant_item = None
         mark_queue = []
         response_start_timestamp_twilio = None
-
-    def send_email_summary(summary: str) -> str:
-        """Sends an email with the call summary."""
-        if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-            logger.error("Email configuration is incomplete. Cannot send email.")
-            return "Error: Email server not configured."
-
-        subject = "Zusammenfassung des Anrufs (James KI Butler)"
-        body = f"Hallo,\n\nhier ist die Zusammenfassung des letzten Anrufs:\n\n{summary}\n\nViele Grüße,\nJames KI Butler"
-
-        msg = MIMEText(body, 'plain', 'utf-8')
-        msg['Subject'] = subject
-        msg['From'] = EMAIL_USER
-        msg['To'] = EMAIL_RECIPIENT
-
-        try:
-            logger.info(f"Attempting to send email summary to {EMAIL_RECIPIENT}")
-            with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-                server.starttls()  # Secure the connection
-                server.login(EMAIL_USER, EMAIL_PASSWORD)
-                server.sendmail(EMAIL_USER, EMAIL_RECIPIENT, msg.as_string())
-            logger.info("Email summary sent successfully.")
-            return "Email successfully sent."
-        except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"SMTP Authentication Error: {e}. Check email user/password.")
-            return f"Error: SMTP Authentication Failed ({e.smtp_code} - {e.smtp_error})."
-        except Exception as e:
-            logger.error(f"Failed to send email: {e}")
-            return f"Error: Could not send email. Reason: {e}"
 
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
@@ -146,24 +109,24 @@ async def handle_media_stream(websocket: WebSocket):
                             mark_queue.pop(0)
                     elif data['event'] == 'stop':
                         logger.info("Twilio call ended. Closing connections.")
-                        if openai_ws.open:
-                            if openai_ws.state == websockets.protocol.State.OPEN:
-                                logger.info("Closing OpenAI WebSocket.")
-                                await openai_ws.close()
-                                await log_websocket_status(openai_ws)
+                        if openai_ws.state == websockets.protocol.State.OPEN:
+                            logger.info("Closing OpenAI WebSocket.")
+                            await openai_ws.close()
+                            await log_websocket_status(openai_ws)
                         return
             except WebSocketDisconnect:
                 print("Client disconnected.")
                 if openai_ws.open:
                     await openai_ws.close()
-
+           
         async def log_websocket_status(ws):
             """Utility function to log the state of the WebSocket connection."""
             if ws.open:
                 logger.info("OpenAI WebSocket is still open.")
             else:
-                logger.info("OpenAI WebSocket is now closed.")
+                 logger.info("OpenAI WebSocket is now closed.")
 
+        
         async def send_to_twilio():
             """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
             nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio
@@ -171,86 +134,9 @@ async def handle_media_stream(websocket: WebSocket):
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
                     if response['type'] in LOG_EVENT_TYPES:
-                        # Log relevantes für Debugging, aber nicht alles um Logs übersichtlich zu halten
-                         if response['type'] not in ['response.audio.delta']: # Audio Delta ist zu häufig
-                            logger.info(f"Received OpenAI event: {response['type']} - Data: {json.dumps(response)}")
+                        print(f"Received event: {response['type']}", response)
 
-
-                    # --- NEU: Tool Call Handling ---
-                    if response.get('type') == 'response.content.delta' and 'tool_calls' in response:
-                        logger.info("Detected tool calls request from OpenAI.")
-                        # Der Realtime API sendet Tool Calls oft als Delta, sammle sie ggf. oder handle direkt
-                        # Annahme: Der Tool Call kommt in einer einzigen Nachricht oder wird hier komplettiert
-                        # In der Praxis muss man Deltas evtl. zusammensetzen, aber für einen Call ist das oft nicht nötig.
-                        tool_calls = response.get('tool_calls', [])
-                        tool_results = []
-
-                        for tool_call in tool_calls:
-                             if tool_call.get('type') == 'function':
-                                function_call = tool_call.get('function')
-                                if not function_call: continue
-
-                                tool_call_id = tool_call.get('id')
-                                function_name = function_call.get('name')
-                                arguments_str = function_call.get('arguments') # Argumente kommen als String JSON
-
-                                logger.info(f"Processing tool call ID: {tool_call_id}, Function: {function_name}, Args: {arguments_str}")
-
-                                if function_name == "send_email_summary":
-                                    try:
-                                        arguments = json.loads(arguments_str)
-                                        summary = arguments.get('summary')
-                                        if summary:
-                                            # Führe die Funktion aus (synchron hier, für lange Tasks ggf. async/thread)
-                                            result_message = send_email_summary(summary)
-                                            tool_results.append({
-                                                "type": "tool_result",
-                                                "tool_call_id": tool_call_id,
-                                                "result": result_message
-                                            })
-                                        else:
-                                            logger.warning("Summary argument missing in tool call.")
-                                            tool_results.append({
-                                                "type": "tool_result",
-                                                "tool_call_id": tool_call_id,
-                                                "result": "Error: Missing 'summary' argument."
-                                            })
-                                    except json.JSONDecodeError:
-                                        logger.error(f"Failed to decode arguments JSON for tool call {tool_call_id}: {arguments_str}")
-                                        tool_results.append({
-                                                "type": "tool_result",
-                                                "tool_call_id": tool_call_id,
-                                                "result": "Error: Invalid arguments format."
-                                            })
-                                    except Exception as e:
-                                         logger.error(f"Error executing tool call {tool_call_id}: {e}")
-                                         tool_results.append({
-                                                "type": "tool_result",
-                                                "tool_call_id": tool_call_id,
-                                                "result": f"Error: Exception during function execution - {e}"
-                                            })
-                                else:
-                                    logger.warning(f"Received unhandled tool call function: {function_name}")
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_call_id": tool_call_id,
-                                        "result": f"Error: Function '{function_name}' is not implemented."
-                                    })
-
-                        # Sende die Ergebnisse zurück an OpenAI
-                        if tool_results:
-                            tool_results_message = {
-                                "type": "tool_results.create",
-                                "results": tool_results
-                            }
-                            logger.info(f"Sending tool results back to OpenAI: {json.dumps(tool_results_message)}")
-                            await openai_ws.send(json.dumps(tool_results_message))
-                            # Fordere eine neue Antwort von OpenAI an, nachdem die Tools ausgeführt wurden
-                            await openai_ws.send(json.dumps({"type": "response.create"}))
-
-
-                    # --- Bestehende Logik für Audio ---
-                    elif response.get('type') == 'response.audio.delta' and 'delta' in response:
+                    if response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
                         audio_delta = {
                             "event": "media",
@@ -288,8 +174,7 @@ async def handle_media_stream(websocket: WebSocket):
             if mark_queue and response_start_timestamp_twilio is not None:
                 elapsed_time = latest_media_timestamp - response_start_timestamp_twilio
                 if SHOW_TIMING_MATH:
-                    print(
-                        f"Calculating elapsed time for truncation: {latest_media_timestamp} - {response_start_timestamp_twilio} = {elapsed_time}ms")
+                    print(f"Calculating elapsed time for truncation: {latest_media_timestamp} - {response_start_timestamp_twilio} = {elapsed_time}ms")
 
                 if last_assistant_item:
                     if SHOW_TIMING_MATH:
@@ -322,8 +207,7 @@ async def handle_media_stream(websocket: WebSocket):
                 await connection.send_json(mark_event)
                 mark_queue.append('responsePart')
 
-            await asyncio.gather(receive_from_twilio(), send_to_twilio())
-
+        await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
 async def send_initial_conversation_item(openai_ws):
     """Send initial conversation item if AI talks first."""
@@ -335,7 +219,7 @@ async def send_initial_conversation_item(openai_ws):
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Begrüße den Anrufer mit 'Hi ich bin James von Couture & Pixels. Was kann ich für Sie tun?'"
+                    "text": "Greet the user with 'Hello there! I am an AI voice assistant that will help you with any questions you may have. Please ask me anything you want to know.'"
                 }
             ]
         }
@@ -343,48 +227,26 @@ async def send_initial_conversation_item(openai_ws):
     await openai_ws.send(json.dumps(initial_conversation_item))
     await openai_ws.send(json.dumps({"type": "response.create"}))
 
-
 async def send_session_update(openai_ws):
     """Send session update to OpenAI WebSocket."""
 
     session_update = {
-        "type": "session.update",
-        "session": {
-            "turn_detection": {"type": "server_vad"},
-            "input_audio_format": "g711_ulaw",
-            "output_audio_format": "g711_ulaw",
-            "voice": VOICE,
-            "instructions": SYSTEM_MESSAGE + " Am Ende des Gesprächs oder auf Anfrage kannst du anbieten, eine Zusammenfassung per E-Mail an service@couture-pixels.de zu senden, indem du die Funktion 'send_email_summary' nutzt.",
-            "modalities": ["text", "audio"],
-            "temperature": 0.8,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "send_email_summary",
-                        "description": "Sendet eine E-Mail mit der Zusammenfassung des Anrufs an service@couture-pixels.de.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "summary": {
-                                    "type": "string",
-                                    "description": "Eine prägnante Zusammenfassung des Gesprächs, die per E-Mail gesendet werden soll."
-                                }
-                            },
-                            "required": ["summary"]
-                        }
-                    }
-                }
-            ]
-        }
+      "type": "session.update",
+      "session": {
+          "turn_detection": {"type": "server_vad"},
+          "input_audio_format": "g711_ulaw",
+          "output_audio_format": "g711_ulaw",
+          "voice": VOICE,
+          "instructions": SYSTEM_MESSAGE,
+          "modalities": ["text", "audio"],
+          "temperature": 0.8,
+      }
     }
     print('Sending session update:', json.dumps(session_update))
     await openai_ws.send(json.dumps(session_update))
 
     await send_initial_conversation_item(openai_ws)
 
-
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+  import uvicorn
+  uvicorn.run(app, host="0.0.0.0", port=PORT)
