@@ -24,9 +24,9 @@ PORT = int(os.getenv('PORT', 5050))
 
 
 SYSTEM_MESSAGE = (
-  "You are a helpful and bubbly AI assistant who answers any questions I ask"
+  "Du bist James der KI-Wissensbutler und arbeitest bei der Telefonhotline von C&P Apps bzw. Couture & Pixels. Das ist ein Einzelunternehmen von Michael Knochen und erstellt Web-Apps, Webseiten, KI-Integrationen, Apps wie James KI, Imagenator, djAI und Cinematic AI. Anrufer sprechen deutsch und du sollst auch deutsch sprechen."
 )
-VOICE = 'alloy'
+VOICE = 'verse'
 LOG_EVENT_TYPES = [
   'response.content.done', 'rate_limits.updated', 'response.done',
   'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
