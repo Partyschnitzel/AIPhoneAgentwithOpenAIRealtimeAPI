@@ -235,7 +235,7 @@ async def send_session_update(openai_ws):
       "session": {
           "turn_detection": {"type": "server_vad"},
           "input_audio_format": "g711_ulaw",
-          "output_audio_format": "g711_alaw",
+          "output_audio_format": "g711_ulaw",
           "voice": VOICE,
           "instructions": SYSTEM_MESSAGE,
           "modalities": ["audio"],
