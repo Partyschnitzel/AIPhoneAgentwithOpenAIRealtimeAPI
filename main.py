@@ -133,8 +133,6 @@ async def handle_media_stream(websocket: WebSocket):
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
-                    # Log *alle* Events für Debugging (oder spezifisch Transkriptions-Events)
-                    logger.info(f"OpenAI Event Received: {response}") # Temporär alle loggen
                     if response['type'] in LOG_EVENT_TYPES:
                         print(f"Received event: {response['type']}", response)
 
@@ -240,7 +238,7 @@ async def send_session_update(openai_ws):
           "output_audio_format": "g711_ulaw",
           "voice": VOICE,
           "instructions": SYSTEM_MESSAGE,
-          "modalities": ["text", "audio"],
+          "modalities": ["audio"],
           "temperature": 0.8,
       }
     }
