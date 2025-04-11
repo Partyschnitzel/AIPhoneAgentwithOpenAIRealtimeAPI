@@ -9,6 +9,8 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 import logging
+import smtplib  # Hinzufügen für E-Mail
+from email.mime.text import MIMEText  # Hinzufügen für E-Mail Formatierung
 
 print(websockets.__version__)
 
@@ -16,31 +18,37 @@ print(websockets.__version__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 load_dotenv()
 # Configuration
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY') # requires OpenAI Realtime API Access
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')  # requires OpenAI Realtime API Access
 PORT = int(os.getenv('PORT', 5050))
-
+# Email Configuration
+EMAIL_HOST = "mxe8b4.netcup.net"  # z.B. smtp.gmail.com
+EMAIL_PORT = "587"  # Standard TLS Port
+EMAIL_USER = "service@couture-pixels.de"
+EMAIL_PASSWORD = "qiqwoj-webqat-berQe6"
+EMAIL_RECIPIENT = "service@couture-pixels.de"
 
 SYSTEM_MESSAGE = (
-  "Du bist James der KI-Wissensbutler und arbeitest bei der Telefonhotlien von C&P Apps bzw. Couture & Pixels. Das ist ein Einzelunternehmen von Michael Knochen und erstellt Web-Apps, Webseiten, Apps wie James KI, Imagenator, djAI und Cinematic AI."
+    "Du bist James der KI-Wissensbutler und arbeitest bei der Telefonhotlien von C&P Apps bzw. Couture & Pixels. Das ist ein Einzelunternehmen von Michael Knochen und erstellt Web-Apps, Webseiten, Apps wie James KI, Imagenator, djAI und Cinematic AI."
 )
 VOICE = 'verse'
 LOG_EVENT_TYPES = [
-  'response.content.done', 'rate_limits.updated', 'response.done',
-  'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
-  'input_audio_buffer.speech_started', 'response.create', 'session.created'
+    'response.content.done', 'rate_limits.updated', 'response.done',
+    'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
+    'input_audio_buffer.speech_started', 'response.create', 'session.created'
 ]
 SHOW_TIMING_MATH = False
 app = FastAPI()
 if not OPENAI_API_KEY:
-  raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
+    raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
     return "<html><body><h1>Twilio Media Stream Server is running!</h1></body></html>"
+
+
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
     """Handle incoming call and return TwiML response to connect to Media Stream."""
@@ -66,8 +74,8 @@ async def handle_media_stream(websocket: WebSocket):
     }
 
     async with websockets.connect(
-        "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
-        additional_headers=headers
+            "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
+            additional_headers=headers
     ) as openai_ws:
         await send_session_update(openai_ws)
 
@@ -77,6 +85,35 @@ async def handle_media_stream(websocket: WebSocket):
         last_assistant_item = None
         mark_queue = []
         response_start_timestamp_twilio = None
+
+    def send_email_summary(summary: str) -> str:
+        """Sends an email with the call summary."""
+        if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
+            logger.error("Email configuration is incomplete. Cannot send email.")
+            return "Error: Email server not configured."
+
+        subject = "Zusammenfassung des Anrufs (James KI Butler)"
+        body = f"Hallo,\n\nhier ist die Zusammenfassung des letzten Anrufs:\n\n{summary}\n\nViele Grüße,\nJames KI Butler"
+
+        msg = MIMEText(body, 'plain', 'utf-8')
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_USER
+        msg['To'] = EMAIL_RECIPIENT
+
+        try:
+            logger.info(f"Attempting to send email summary to {EMAIL_RECIPIENT}")
+            with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
+                server.starttls()  # Secure the connection
+                server.login(EMAIL_USER, EMAIL_PASSWORD)
+                server.sendmail(EMAIL_USER, EMAIL_RECIPIENT, msg.as_string())
+            logger.info("Email summary sent successfully.")
+            return "Email successfully sent."
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"SMTP Authentication Error: {e}. Check email user/password.")
+            return f"Error: SMTP Authentication Failed ({e.smtp_code} - {e.smtp_error})."
+        except Exception as e:
+            logger.error(f"Failed to send email: {e}")
+            return f"Error: Could not send email. Reason: {e}"
 
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
@@ -110,10 +147,10 @@ async def handle_media_stream(websocket: WebSocket):
                     elif data['event'] == 'stop':
                         logger.info("Twilio call ended. Closing connections.")
                         if openai_ws.open:
-                        if openai_ws.state == websockets.protocol.State.OPEN:
-                            logger.info("Closing OpenAI WebSocket.")
-                            await openai_ws.close()
-                            await log_websocket_status(openai_ws)
+                            if openai_ws.state == websockets.protocol.State.OPEN:
+                                logger.info("Closing OpenAI WebSocket.")
+                                await openai_ws.close()
+                                await log_websocket_status(openai_ws)
                         return
             except WebSocketDisconnect:
                 print("Client disconnected.")
@@ -125,8 +162,7 @@ async def handle_media_stream(websocket: WebSocket):
             if ws.open:
                 logger.info("OpenAI WebSocket is still open.")
             else:
-                 logger.info("OpenAI WebSocket is now closed.")
-
+                logger.info("OpenAI WebSocket is now closed.")
 
         async def send_to_twilio():
             """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
@@ -175,7 +211,8 @@ async def handle_media_stream(websocket: WebSocket):
             if mark_queue and response_start_timestamp_twilio is not None:
                 elapsed_time = latest_media_timestamp - response_start_timestamp_twilio
                 if SHOW_TIMING_MATH:
-                    print(f"Calculating elapsed time for truncation: {latest_media_timestamp} - {response_start_timestamp_twilio} = {elapsed_time}ms")
+                    print(
+                        f"Calculating elapsed time for truncation: {latest_media_timestamp} - {response_start_timestamp_twilio} = {elapsed_time}ms")
 
                 if last_assistant_item:
                     if SHOW_TIMING_MATH:
@@ -210,6 +247,7 @@ async def handle_media_stream(websocket: WebSocket):
 
         await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
+
 async def send_initial_conversation_item(openai_ws):
     """Send initial conversation item if AI talks first."""
     initial_conversation_item = {
@@ -228,26 +266,48 @@ async def send_initial_conversation_item(openai_ws):
     await openai_ws.send(json.dumps(initial_conversation_item))
     await openai_ws.send(json.dumps({"type": "response.create"}))
 
+
 async def send_session_update(openai_ws):
     """Send session update to OpenAI WebSocket."""
 
     session_update = {
-      "type": "session.update",
-      "session": {
-          "turn_detection": {"type": "server_vad"},
-          "input_audio_format": "opus",
-          "output_audio_format": "opus",
-          "voice": VOICE,
-          "instructions": SYSTEM_MESSAGE,
-          "modalities": ["text", "audio"],
-          "temperature": 0.8,
-      }
+        "type": "session.update",
+        "session": {
+            "turn_detection": {"type": "server_vad"},
+            "input_audio_format": "opus",
+            "output_audio_format": "opus",
+            "voice": VOICE,
+            "instructions": SYSTEM_MESSAGE + " Am Ende des Gesprächs oder auf Anfrage kannst du anbieten, eine Zusammenfassung per E-Mail an service@couture-pixels.de zu senden, indem du die Funktion 'send_email_summary' nutzt.",
+            "modalities": ["text", "audio"],
+            "temperature": 0.8,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "send_email_summary",
+                        "description": "Sendet eine E-Mail mit der Zusammenfassung des Anrufs an service@couture-pixels.de.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "summary": {
+                                    "type": "string",
+                                    "description": "Eine prägnante Zusammenfassung des Gesprächs, die per E-Mail gesendet werden soll."
+                                }
+                            },
+                            "required": ["summary"]
+                        }
+                    }
+                }
+            ]
+        }
     }
     print('Sending session update:', json.dumps(session_update))
     await openai_ws.send(json.dumps(session_update))
 
     await send_initial_conversation_item(openai_ws)
 
+
 if __name__ == "__main__":
-  import uvicorn
-  uvicorn.run(app, host="0.0.0.0", port=PORT)
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
