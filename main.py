@@ -15,7 +15,6 @@ import urllib.parse
 import requests
 import time
 import random
-import replicate
 from datetime import date
 from datetime import timedelta
 
