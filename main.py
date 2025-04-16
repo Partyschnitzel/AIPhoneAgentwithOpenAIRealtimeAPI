@@ -9,6 +9,7 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 import logging
+from datetime import date  # Add this import for getDateToday
 
 print(websockets.__version__)
 
@@ -28,15 +29,43 @@ VOICE = 'verse'
 LOG_EVENT_TYPES = [
     'response.content.done', 'rate_limits.updated', 'response.done',
     'input_audio_buffer.committed', 'input_audio_buffer.speech_stopped',
-    'input_audio_buffer.speech_started', 'response.create', 'session.created'
+    'input_audio_buffer.speech_started', 'response.create', 'session.created',
+    'response.content.tool_calls', 'response.content.tool_calls_done'  # Add tool calls events to log
 ]
 SHOW_TIMING_MATH = False
 app = FastAPI()
 if not OPENAI_API_KEY:
     raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 
-def getDateToday(optional = True):
+# Define your tools
+TOOLS = [
+    {
+        "name": "getDateToday",
+        "description": "Get the current date in YYYY-MM-DD format",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "optional": {
+                    "type": "boolean",
+                    "description": "Optional parameter, doesn't affect the result"
+                }
+            },
+            "required": []
+        }
+    }
+    # Add more tool definitions here as needed
+]
+
+# Define your function implementations
+def getDateToday(optional=True):
+    """Get the current date in YYYY-MM-DD format."""
     return date.today().strftime('%Y-%m-%d')
+
+# Function dispatcher - maps function names to actual functions
+FUNCTION_MAP = {
+    "getDateToday": getDateToday,
+    # Add more functions here as needed
+}
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
@@ -79,6 +108,7 @@ async def handle_media_stream(websocket: WebSocket):
         last_assistant_item = None
         mark_queue = []
         response_start_timestamp_twilio = None
+        pending_tool_calls = {}  # To track tool calls by ID
 
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
@@ -128,16 +158,59 @@ async def handle_media_stream(websocket: WebSocket):
             else:
                 logger.info("OpenAI WebSocket is now closed.")
 
+        async def handle_tool_call(tool_call):
+            """Execute a tool call and return the result."""
+            try:
+                function_name = tool_call.get('function', {}).get('name')
+                function_args = json.loads(tool_call.get('function', {}).get('arguments', '{}'))
+                
+                if function_name not in FUNCTION_MAP:
+                    logger.error(f"Function {function_name} not found in function map")
+                    return {"error": f"Function {function_name} not implemented"}
+                
+                logger.info(f"Executing function {function_name} with args {function_args}")
+                function = FUNCTION_MAP[function_name]
+                result = function(**function_args)
+                logger.info(f"Function result: {result}")
+                return result
+            except Exception as e:
+                logger.error(f"Error executing tool call: {e}")
+                return {"error": str(e)}
+
         async def send_to_twilio():
             """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
-            nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio
+            nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio, pending_tool_calls
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
                     if response['type'] in LOG_EVENT_TYPES:
                         print(f"Received event: {response['type']}", response)
 
-                    if response.get('type') == 'response.audio.delta' and 'delta' in response:
+                    # Handle tool calls from the API
+                    if response.get('type') == 'response.content.tool_calls':
+                        tool_call_id = response.get('tool_call', {}).get('id')
+                        if tool_call_id:
+                            pending_tool_calls[tool_call_id] = response.get('tool_call')
+                    
+                    # When tool calls are done, process them
+                    elif response.get('type') == 'response.content.tool_calls_done':
+                        for tool_call_id, tool_call in pending_tool_calls.items():
+                            # Execute the function
+                            result = await handle_tool_call(tool_call)
+                            
+                            # Send the result back to OpenAI
+                            tool_call_result = {
+                                "type": "conversation.item.tool_result.create",
+                                "tool_call_id": tool_call_id,
+                                "content": json.dumps(result)
+                            }
+                            logger.info(f"Sending tool call result: {tool_call_result}")
+                            await openai_ws.send(json.dumps(tool_call_result))
+                        
+                        # Clear pending tool calls
+                        pending_tool_calls = {}
+
+                    elif response.get('type') == 'response.audio.delta' and 'delta' in response:
                         audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
                         audio_delta = {
                             "event": "media",
@@ -244,6 +317,7 @@ async def send_session_update(openai_ws):
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
             "temperature": 0.8,
+            "tools": TOOLS  # Add the tools definition here
         }
     }
     print('Sending session update:', json.dumps(session_update))
