@@ -307,7 +307,7 @@ async def handle_media_stream(websocket: WebSocket):
 
                             logger.debug(f"Audio Delta Check: stream_sid set? {is_sid_set} (value='{stream_sid}'), websocket connected? {is_ws_open} (state='{websocket.client_state}')")
 
-                            if is_sid_set and is_ws_connected:
+                            if is_sid_set and is_ws_open:
                                 audio_payload = response['delta']
                                 # HIER fehlt die Definition von audio_delta!
                                 # Es sollte so aussehen:
