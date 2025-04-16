@@ -424,11 +424,48 @@ async def send_initial_conversation_item(openai_ws):
 
 async def send_session_update(openai_ws):
     logger.info("Preparing session update with tools.")
-    session_update = { ... } # Wie gehabt
-    logger.info(f'Sending session update to OpenAI: {json.dumps(session_update)}')
-    await openai_ws.send(json.dumps(session_update))
-    logger.info("Session update sent. Waiting for session.updated confirmation...")
-    await send_initial_conversation_item(openai_ws)
+    session_update = {
+        "type": "session.update",
+        "session": {
+            "turn_detection": {"type": "server_vad"},
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
+            "voice": VOICE,
+            "instructions": SYSTEM_MESSAGE,
+            "modalities": ["text", "audio"],
+            "temperature": 0.8,
+            "tools": [GET_CURRENT_DATE_TOOL]
+        }
+    }
+
+    serialized_data = None
+    try:
+        # Schritt 1: Versuche zu serialisieren
+        serialized_data = json.dumps(session_update)
+        logger.info("DEBUG: JSON serialization successful.")
+
+        # Schritt 2: Logge die serialisierte Nachricht (als String)
+        logger.info(f"Sending session update to OpenAI: {serialized_data}")
+
+        # Schritt 3: Sende die bereits serialisierte Nachricht
+        await openai_ws.send(serialized_data)
+        logger.info("Session update sent successfully.")
+
+        # Schritt 4: Fahre fort
+        await send_initial_conversation_item(openai_ws)
+
+    except TypeError as e:
+        logger.error(f"!!! JSON dump failed in send_session_update: {e}", exc_info=True)
+        # Logge die ursprüngliche Struktur, um das problematische Element zu finden
+        logger.error(f"Problematic structure was: {session_update}")
+        # Optional: Logge die Typen wie im vorherigen Debugging-Schritt
+        logger.info(f"DEBUG: Type of VOICE: {type(VOICE)}")
+        logger.info(f"DEBUG: Type of SYSTEM_MESSAGE: {type(SYSTEM_MESSAGE)}")
+        logger.info(f"DEBUG: Type of GET_CURRENT_DATE_TOOL: {type(GET_CURRENT_DATE_TOOL)}")
+        # ... tiefere Prüfung ...
+
+    except Exception as e: # Fange andere Fehler beim Senden ab
+        logger.error(f"Error sending session update or calling initial item: {e}", exc_info=True)
 
 if __name__ == "__main__":
     import uvicorn
