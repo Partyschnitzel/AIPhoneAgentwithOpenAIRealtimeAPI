@@ -225,15 +225,22 @@ async def handle_media_stream(websocket: WebSocket):
 
                         # --- Audio an Twilio senden ---
                         if response_type == 'response.audio.delta' and 'delta' in response:
-                            if stream_sid and websocket.client_state == websockets.protocol.State.OPEN:
+                            # == NEUE PRÜFUNG ==
+                            # Prüfe explizit, ob stream_sid gesetzt ist, BEVOR versucht wird zu senden.
+                            if not stream_sid:
+                                logger.warning(f"Dropping audio delta because stream_sid is not set yet. State: {websocket.client_state}")
+                                continue # Überspringe diesen Audio-Chunk
+
+                            # Prüfe danach den WebSocket-Status
+                            if websocket.client_state == websockets.protocol.State.OPEN:
                                 audio_payload = response['delta'] # Ist bereits base64 encoded von OpenAI
                                 audio_delta = {
                                     "event": "media",
-                                    "streamSid": stream_sid,
+                                    "streamSid": stream_sid, # stream_sid ist hier garantiert nicht None
                                     "media": {
                                         "payload": audio_payload
                                     }
-                                }
+                                 }
                                 # logger.debug("Sending audio delta to Twilio.") # Optional
                                 await websocket.send_json(audio_delta)
 
