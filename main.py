@@ -51,14 +51,15 @@ GET_CURRENT_DATE_TOOL = {
     "description": "Gibt das aktuelle Datum zurück. Verwende dies, wenn der Benutzer nach dem heutigen Datum fragt.",
     "parameters": {
         "type": "object",
-        "properties": {},
-        "required": []
+        "properties": {}, # Keine Parameter nötig
+        "required": []    # Keine Parameter nötig
     }
 }
 
 def get_current_date():
+    """Gibt das aktuelle Datum als formatierten String zurück."""
     now = datetime.datetime.now()
-    return now.strftime("%d. %B %Y")
+    return now.strftime("%d. %B %Y") # Format z.B. "16. April 2025"
 
 AVAILABLE_TOOLS = {
     "get_current_date": get_current_date
@@ -71,10 +72,13 @@ async def index_page():
 
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
+    """Handle incoming call and return TwiML response to connect to Media Stream."""
     logger.info("Received incoming call request from: %s", request.client.host)
     response = VoiceResponse()
     host = request.url.hostname
+    # Verwende Hostname aus Request für korrekte WS-URL hinter Proxies/Load Balancern
     connect_host = request.headers.get("host", host)
+    # Prüfe x-forwarded-proto oder request scheme für https
     ws_scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https" else "ws"
     stream_url = f'{ws_scheme}://{connect_host}/media-stream'
     logger.info(f"Connecting media stream to: {stream_url}")
@@ -86,6 +90,8 @@ async def handle_incoming_call(request: Request):
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
+    """Handle WebSocket connections between Twilio and OpenAI."""
+    # Verwende websocket.client für FastAPI/Starlette
     logger.info(f"WebSocket client connected from: {websocket.client}")
     await websocket.accept()
     logger.info("WebSocket connection accepted.")
@@ -96,68 +102,73 @@ async def handle_media_stream(websocket: WebSocket):
     }
     openai_ws_url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
 
+    openai_ws = None # Definiere außerhalb des try für finally-Block
     try:
         async with websockets.connect(
                 openai_ws_url,
                 additional_headers=headers
-        ) as openai_ws:
+        ) as openai_ws_conn:
+            openai_ws = openai_ws_conn # Weise der äußeren Variable zu
             logger.info("Connected to OpenAI Realtime API.")
             await send_session_update(openai_ws)
 
+            # Connection specific state
             stream_sid = None
             latest_media_timestamp = 0
             last_assistant_item = None
             mark_queue = []
             response_start_timestamp_twilio = None
             current_function_calls = {}
+            # Event für die Synchronisation von stream_sid
             stream_sid_ready = asyncio.Event()
 
+            # --- Nested async functions ---
             async def receive_from_twilio():
+                """Empfängt Nachrichten von Twilio, verarbeitet Start/Connected, leitet Media weiter."""
                 nonlocal stream_sid, latest_media_timestamp, last_assistant_item, response_start_timestamp_twilio, current_function_calls
                 nonlocal stream_sid_ready
 
-                connected_received = False
                 start_received = False
-
                 try:
+                    # Warte auf initiale Nachrichten (Connected, dann Start)
                     logger.info("receive_from_twilio: Waiting for initial 'connected' and 'start' messages...")
-                    for _ in range(2):
-                        message_text = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+                    for _ in range(2): # Erwarte maximal 2 initiale Nachrichten
+                        message_text = await asyncio.wait_for(websocket.receive_text(), timeout=15.0) # Etwas längerer Timeout
                         data = json.loads(message_text)
                         event = data.get('event')
                         logger.info(f"receive_from_twilio: Received initial message: {event}")
 
                         if event == 'connected':
                             logger.info("receive_from_twilio: 'connected' event confirmed.")
-                            connected_received = True
                         elif event == 'start':
                             stream_sid = data['start']['streamSid']
                             logger.info(f"receive_from_twilio: 'start' event processed. stream_sid: {stream_sid}")
                             start_received = True
-
+                            # Reset state
                             response_start_timestamp_twilio = None
                             latest_media_timestamp = 0
                             last_assistant_item = None
                             current_function_calls.clear()
                             logger.info("receive_from_twilio: State variables reset.")
-
+                            # Signalisiere Bereitschaft
                             logger.info("receive_from_twilio: Setting stream_sid_ready event.")
                             stream_sid_ready.set()
-                            break
+                            break # Wichtig: Breche die Schleife ab, nachdem 'start' empfangen wurde
                         else:
                             logger.warning(f"receive_from_twilio: Received unexpected initial message: {data}")
 
+                    # Überprüfe, ob 'start' empfangen wurde
                     if not start_received:
                          logger.error("receive_from_twilio: Did not receive 'start' message after initial messages.")
-                         if not stream_sid_ready.is_set(): stream_sid_ready.set()
-                         return
+                         if not stream_sid_ready.is_set(): stream_sid_ready.set() # Deadlock verhindern
+                         return # Task beenden
 
                 except asyncio.TimeoutError:
                     logger.error("receive_from_twilio: Timed out waiting for initial messages from Twilio.")
                     if not stream_sid_ready.is_set(): stream_sid_ready.set()
                     return
                 except WebSocketDisconnect as e:
-                     logger.error(f"receive_from_twilio: WebSocket disconnected during initial message handling: {e}", exc_info=True)
+                     logger.error(f"receive_from_twilio: WebSocket disconnected during initial message handling: Code {e.code}", exc_info=True)
                      if not stream_sid_ready.is_set(): stream_sid_ready.set()
                      return
                 except (json.JSONDecodeError, Exception) as e:
@@ -165,6 +176,7 @@ async def handle_media_stream(websocket: WebSocket):
                     if not stream_sid_ready.is_set(): stream_sid_ready.set()
                     return
 
+                # Hauptschleife für Media, Mark, Stop
                 try:
                     logger.info("receive_from_twilio: Entering main loop for media/mark/stop events...")
                     async for message in websocket.iter_text():
@@ -175,7 +187,7 @@ async def handle_media_stream(websocket: WebSocket):
                              continue
                          event = data.get('event')
 
-                         if event == 'media' and openai_ws.state == websockets.protocol.State.OPEN:
+                         if event == 'media' and openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
                              latest_media_timestamp = int(data['media']['timestamp'])
                              audio_append = {
                                  "type": "input_audio_buffer.append",
@@ -183,63 +195,46 @@ async def handle_media_stream(websocket: WebSocket):
                              }
                              await openai_ws.send(json.dumps(audio_append))
                          elif event == 'mark':
-                             mark_name = data.get('mark', {}).get('name')
-                             logger.debug(f"Received mark event: {mark_name}")
-                             if mark_queue:
-                                 try:
-                                      mark_queue.pop(0)
-                                 except IndexError:
-                                      logger.warning("Mark queue was empty when trying to pop.")
+                             # ... (Mark-Verarbeitung) ...
+                             if mark_queue: try: mark_queue.pop(0) except IndexError: pass
                          elif event == 'stop':
                              logger.info("Twilio call stopped event received in loop. Closing connections.")
-                             if openai_ws.state == websockets.protocol.State.OPEN:
+                             if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
                                  logger.info("Closing OpenAI WebSocket due to Twilio stop event.")
                                  await openai_ws.close(code=1000, reason="Twilio call ended")
-                             return
-                         else:
-                            logger.debug(f"Received unhandled Twilio event in loop: {event}")
+                             return # Stop this task
+                         # else: logger.debug(f"Unhandled Twilio event in loop: {event}")
 
-                except websockets.exceptions.WebSocketException as e:
-                     logger.error(f"Failed to connect to OpenAI WebSocket: {e}", exc_info=True)
-                     # Stelle sicher, dass die Twilio-Verbindung auch hier geschlossen wird
-                     if websocket.client_state != WebSocketState.DISCONNECTED:
-                         try:
-                             await websocket.close(code=1011, reason="OpenAI connection failed")
-                             logger.info("Closed Twilio WebSocket due to OpenAI connection failure.")
-                         except RuntimeError: # Fange den Fehler ab, falls schon geschlossen
-                             pass
+                except WebSocketDisconnect as e:
+                    logger.info(f"Twilio WebSocket disconnected during main loop. Code: {e.code}")
                 except Exception as e:
-                    logger.error(f"An unexpected error occurred in handle_media_stream: {e}", exc_info=True)
-                    # Stelle sicher, dass die Twilio-Verbindung auch hier geschlossen wird
-                    if websocket.client_state != WebSocketState.DISCONNECTED:
-                         try:
-                             await websocket.close(code=1011, reason="Unexpected handler error")
-                             logger.info("Closed Twilio WebSocket due to unexpected handler error.")
-                         except RuntimeError: # Fange den Fehler ab, falls schon geschlossen
-                              pass
-    finally:
-        logger.info("Final cleanup in handle_media_stream.")
-        # Prüfe hier ZULETZT, ob die Twilio-Verbindung noch offen ist, bevor du schließt
-        if websocket.client_state != WebSocketState.DISCONNECTED:
-             logger.info("Closing Twilio WebSocket in final finally block.")
-             try:
-                 await websocket.close(code=1000, reason="Handler finished normally")
-             except RuntimeError: # Fange den Fehler ab, falls sie *genau jetzt* von anderer Seite geschlossen wurde
-                 logger.warning("Tried to close Twilio WebSocket in final finally block, but it was already closed.")
-        else:
-            logger.info("Twilio WebSocket already closed before final finally block.")
+                    logger.error(f"Error in receive_from_twilio main loop: {e}", exc_info=True)
+                finally:
+                    logger.info("receive_from_twilio task finished (main loop section).")
+                    # Stelle sicher, dass das Event gesetzt ist, falls Task frühzeitig endet
+                    if not stream_sid_ready.is_set():
+                         logger.warning("receive_from_twilio: Setting stream_sid_ready event in finally block.")
+                         stream_sid_ready.set()
+                    # Schließe OpenAI WS NICHT hier, wird von außen gehandhabt
 
             async def send_to_twilio():
+                """Empfängt von OpenAI, sendet Audio, verarbeitet Tool Calls."""
                 nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio, current_function_calls
                 try:
+                    # Warte, bis stream_sid von receive_from_twilio gesetzt wurde
                     logger.info("send_to_twilio: Waiting for stream_sid to be set...")
                     try:
                         await asyncio.wait_for(stream_sid_ready.wait(), timeout=10.0)
+                        # Prüfe, ob stream_sid nach dem Warten tatsächlich gesetzt wurde
+                        if not stream_sid:
+                             logger.error("send_to_twilio: stream_sid_ready event was set, but stream_sid is still None!")
+                             return # Beende den Task, da Senden unmöglich ist
                         logger.info(f"send_to_twilio: stream_sid is ready (value: {stream_sid}). Proceeding.")
                     except asyncio.TimeoutError:
                         logger.error("send_to_twilio: Timed out waiting for stream_sid! Cannot proceed.")
                         return
 
+                    # Hauptschleife für OpenAI-Nachrichten
                     async for openai_message in openai_ws:
                         try:
                             response = json.loads(openai_message)
@@ -249,6 +244,7 @@ async def handle_media_stream(websocket: WebSocket):
 
                         response_type = response.get('type')
 
+                        # Logging und Fehlerbehandlung
                         if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
                             logger.info(f"Received from OpenAI: Type={response_type}, Data={response}")
                         if response_type == 'error':
@@ -256,60 +252,59 @@ async def handle_media_stream(websocket: WebSocket):
                             continue
                         if response_type == 'session.updated':
                              logger.info(f"OpenAI Session Updated. Final config: {response.get('session')}")
-                             session_config = response.get('session', {})
-                             if session_config.get('input_audio_format') != 'g711_ulaw' or session_config.get('output_audio_format') != 'g711_ulaw':
-                                 logger.warning(f"!!! Audio format mismatch after session update!")
-                             if not session_config.get('tools'):
-                                 logger.warning("!!! Tools seem to be missing after session update!")
+                             # Optional: Prüfung der Konfiguration
 
+                        # Audio an Twilio senden
                         if response_type == 'response.audio.delta' and 'delta' in response:
-                            is_sid_set = bool(stream_sid)
+                            is_sid_set = bool(stream_sid) # Sollte jetzt immer True sein
+                            # Verwende korrekten State für FastAPI/Starlette
                             is_ws_connected = websocket.client_state == WebSocketState.CONNECTED
 
+                            # Debug Log beibehalten
                             logger.debug(f"Audio Delta Check: stream_sid set? {is_sid_set} (value='{stream_sid}'), websocket connected? {is_ws_connected} (state='{websocket.client_state}')")
 
                             if is_sid_set and is_ws_connected:
                                 audio_payload = response['delta']
-                                audio_delta = { # Definition war hier korrekt
+                                audio_delta = {
                                     "event": "media",
                                     "streamSid": stream_sid,
-                                    "media": {
-                                        "payload": audio_payload
-                                    }
+                                    "media": { "payload": audio_payload }
                                 }
                                 await websocket.send_json(audio_delta)
 
+                                # Timestamps und Mark setzen
                                 if response_start_timestamp_twilio is None:
                                     response_start_timestamp_twilio = latest_media_timestamp
-                                    if SHOW_TIMING_MATH:
-                                        logger.info(f"Setting start timestamp: {response_start_timestamp_twilio}ms")
                                 if response.get('item_id'):
                                     last_assistant_item = response['item_id']
                                 await send_mark(websocket, stream_sid)
                             else:
                                 logger.warning(f"Cannot send audio delta. [Debug Detail] is_sid_set={is_sid_set}, is_ws_connected={is_ws_connected}, stream_sid='{stream_sid}', state='{websocket.client_state}'")
 
+                        # Unterbrechung durch Benutzer
                         if response_type == 'input_audio_buffer.speech_started':
                             logger.info("User speech started detected.")
                             if last_assistant_item:
                                 logger.info(f"Interrupting response with id: {last_assistant_item}")
                                 await handle_speech_started_event()
 
+                        # Tool Calling - Argumente sammeln
                         if response_type == 'response.function_call_arguments.delta':
                              call_id = response.get('call_id')
                              delta = response.get('delta')
                              if call_id and delta is not None:
                                  if call_id not in current_function_calls:
-                                     current_function_calls[call_id] = {"name": None, "arguments": ""}
+                                     current_function_calls[call_id] = {"name": None, "arguments": ""} # Name noch nicht speichern
                                      logger.info(f"Receiving arguments for function call {call_id}...")
                                  current_function_calls[call_id]["arguments"] += delta
 
+                        # Tool Calling - Ausführung
                         elif response_type == 'response.function_call_arguments.done':
                             call_id = response.get('call_id')
-                            function_name_from_event = response.get('name')
+                            function_name_from_event = response.get('name') # Namen hier holen
 
                             if call_id in current_function_calls:
-                                current_function_calls[call_id]["name"] = function_name_from_event
+                                current_function_calls[call_id]["name"] = function_name_from_event # Namen speichern
                                 logger.info(f"Finished receiving arguments for function call {call_id}, Name: '{function_name_from_event}'")
 
                                 function_call_info = current_function_calls.pop(call_id)
@@ -320,32 +315,31 @@ async def handle_media_stream(websocket: WebSocket):
                                 if function_name and function_name in AVAILABLE_TOOLS:
                                     try:
                                         tool_function = AVAILABLE_TOOLS[function_name]
-                                        result = tool_function()
-                                        output_str = str(result)
+                                        result = tool_function() # Funktion aufrufen
+                                        output_str = str(result) # Sicherstellen, dass es ein String ist
                                         logger.info(f"Tool '{function_name}' executed successfully. Result: {output_str}")
 
+                                        # Ergebnis senden
                                         function_output_item = {
                                             "type": "conversation.item.create",
                                             "item": {
                                                 "type": "function_call_output",
                                                 "call_id": call_id,
-                                                "output": output_str
+                                                "output": output_str # Hier steht der String
                                             }
                                         }
                                         logger.info(f"Sending function_call_output for {call_id} to OpenAI.")
-                                        # === FEHLERBEHEBUNG ===
-                                        # JSON kann keine Sets serialisieren, was ein Problem verursachen KÖNNTE,
-                                        # obwohl unwahrscheinlich bei DIESEM Tool. Wir serialisieren explizit den output_str.
+                                        # Erneut versuchen zu senden, Fehler wird jetzt besser behandelt
                                         await openai_ws.send(json.dumps(function_output_item))
-                                        # =====================
 
+                                        # Neue Antwort anfordern
                                         response_create_item = {"type": "response.create"}
                                         logger.info(f"Sending response.create after tool call {call_id}.")
                                         await openai_ws.send(json.dumps(response_create_item))
 
-                                    except TypeError as e: # Fange spezifischen TypeError ab
-                                        logger.error(f"JSON Serialization Error for tool '{function_name}': {e}", exc_info=True)
-                                        # Optional: Sende Fehlermeldung an OpenAI?
+                                    except TypeError as e: # Spezifisch für JSON-Fehler
+                                        logger.error(f"!!! JSON Serialization Error sending function_call_output for tool '{function_name}': {e}", exc_info=True)
+                                        logger.error(f"Problematic function_output_item: {function_output_item}")
                                     except Exception as e:
                                         logger.error(f"Error executing/sending tool '{function_name}': {e}", exc_info=True)
                                 else:
@@ -359,33 +353,37 @@ async def handle_media_stream(websocket: WebSocket):
                      logger.error(f"Error in send_to_twilio: {e}", exc_info=True)
                 finally:
                     logger.info("send_to_twilio task finished.")
-                    if websocket.client_state == WebSocketState.CONNECTED:
-                         logger.info("Closing Twilio WebSocket from send_to_twilio finally block.")
-                         await websocket.close(code=1000, reason="OpenAI connection task ended")
+                    # Schließe Twilio WS NICHT hier, wird von außen gehandhabt
 
             async def handle_speech_started_event():
+                """Behandelt Unterbrechung durch Benutzer."""
                 nonlocal response_start_timestamp_twilio, last_assistant_item
                 logger.info("Handling speech started event for interruption.")
-                if websocket.client_state != WebSocketState.CONNECTED: # Korrigiert
+                # Verwende korrekten State für FastAPI/Starlette
+                if websocket.client_state != WebSocketState.CONNECTED:
                      logger.warning("Cannot handle speech started event, Twilio WebSocket is not connected.")
                      return
 
                 if mark_queue and response_start_timestamp_twilio is not None and last_assistant_item:
                     elapsed_time = latest_media_timestamp - response_start_timestamp_twilio
-                    if SHOW_TIMING_MATH:
-                        logger.info(f"Truncating elapsed time: {elapsed_time}ms")
                     logger.info(f"Truncating item {last_assistant_item} at {elapsed_time}ms")
 
-                    truncate_event = { ... } # Wie gehabt
-                    if openai_ws.state == websockets.protocol.State.OPEN:
+                    truncate_event = {
+                        "type": "conversation.item.truncate",
+                        "item_id": last_assistant_item,
+                        "content_index": 0,
+                        "audio_end_ms": elapsed_time
+                    }
+                    if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
                          logger.info(f"Sending truncate event to OpenAI: {truncate_event}")
                          await openai_ws.send(json.dumps(truncate_event))
                     else:
-                         logger.warning("Cannot send truncate event, OpenAI WebSocket is closed.")
+                         logger.warning("Cannot send truncate event, OpenAI WebSocket is closed or unavailable.")
 
                     logger.info(f"Sending clear event to Twilio for stream {stream_sid}")
-                    await websocket.send_json({ ... }) # Wie gehabt
+                    await websocket.send_json({ "event": "clear", "streamSid": stream_sid })
 
+                    # Reset state
                     mark_queue.clear()
                     last_assistant_item = None
                     response_start_timestamp_twilio = None
@@ -393,24 +391,34 @@ async def handle_media_stream(websocket: WebSocket):
                     logger.info("Skipping interruption handling: Conditions not met.")
 
             async def send_mark(connection, stream_sid_local):
-                 if stream_sid_local and connection.client_state == WebSocketState.CONNECTED: # Korrigiert
+                 """Sendet Mark-Events an Twilio."""
+                 # Verwende korrekten State für FastAPI/Starlette
+                 if stream_sid_local and connection.client_state == WebSocketState.CONNECTED:
                      mark_name = f"response_part_{len(mark_queue)}"
-                     mark_event = { ... } # Wie gehabt
+                     mark_event = {
+                         "event": "mark",
+                         "streamSid": stream_sid_local,
+                         "mark": {"name": mark_name}
+                     }
                      await connection.send_json(mark_event)
                      mark_queue.append(mark_name)
                  else:
                      logger.warning(f"Cannot send mark: stream_sid={stream_sid_local}, connection_state={connection.client_state}")
+            # --- Ende der nested functions ---
 
+            # Starte die beiden Haupt-Tasks
             logger.info("Starting receive_from_twilio and send_to_twilio tasks.")
             receive_task = asyncio.create_task(receive_from_twilio())
             send_task = asyncio.create_task(send_to_twilio())
 
+            # Warte, bis einer der Tasks beendet ist
             done, pending = await asyncio.wait(
                 [receive_task, send_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
             logger.info(f"One task finished: {done}. Pending tasks: {pending}")
+            # Beende verbleibende Tasks sauber
             for task in pending:
                 logger.info(f"Cancelling pending task: {task.get_name()}")
                 task.cancel()
@@ -418,21 +426,41 @@ async def handle_media_stream(websocket: WebSocket):
                     await task
                 except asyncio.CancelledError:
                     logger.info(f"Task {task.get_name()} was cancelled successfully.")
-                except Exception as e:
+                except Exception as e: # Fange Fehler beim Canceln ab
                     logger.error(f"Error during cancellation of task {task.get_name()}: {e}", exc_info=True)
             logger.info("All tasks finished or cancelled.")
 
-    except websockets.exceptions.WebSocketException as e:
+    except websockets.exceptions.WebSocketException as e: # OpenAI Verbindungsfehler
          logger.error(f"Failed to connect to OpenAI WebSocket: {e}", exc_info=True)
-    except Exception as e:
+         # Stelle sicher, dass Twilio geschlossen wird
+         if websocket.client_state != WebSocketState.DISCONNECTED:
+             try: await websocket.close(code=1011, reason="OpenAI connection failed")
+             except RuntimeError: pass
+    except Exception as e: # Andere unerwartete Fehler
         logger.error(f"An unexpected error occurred in handle_media_stream: {e}", exc_info=True)
+        # Stelle sicher, dass Twilio geschlossen wird
+        if websocket.client_state != WebSocketState.DISCONNECTED:
+             try: await websocket.close(code=1011, reason="Unexpected handler error")
+             except RuntimeError: pass
     finally:
-        logger.info("Closing WebSocket connection handler for Twilio.")
-        if websocket.client_state != WebSocketState.DISCONNECTED: # Sicherer Check
-             logger.info("Closing Twilio WebSocket in handle_media_stream finally block.")
-             await websocket.close(code=1000, reason="Handler finished")
+        logger.info("Final cleanup in handle_media_stream.")
+        # Schließe OpenAI WS, falls noch offen
+        if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
+            logger.info("Closing OpenAI WebSocket in final finally block.")
+            await openai_ws.close(code=1000, reason="Handler finished")
+        # Schließe Twilio WS, falls noch offen (letzte Instanz)
+        if websocket.client_state != WebSocketState.DISCONNECTED:
+             logger.info("Closing Twilio WebSocket in final finally block.")
+             try:
+                 await websocket.close(code=1000, reason="Handler finished normally")
+             except RuntimeError:
+                 logger.warning("Tried to close Twilio WebSocket in final finally block, but it was already closed.")
+        else:
+            logger.info("Twilio WebSocket already closed before final finally block.")
+
 
 async def send_initial_conversation_item(openai_ws):
+    """Sendet die initiale Nachricht und fordert eine Antwort an."""
     logger.info("Sending initial conversation item to start the conversation.")
     initial_conversation_item = {
         "type": "conversation.item.create",
@@ -447,29 +475,29 @@ async def send_initial_conversation_item(openai_ws):
             ]
         }
     }
-
-    # === NEU: Debugging direkt vor dem Fehler ===
+    # --- Debugging für TypeError ---
     logger.info(f"DEBUG: Type of initial_conversation_item: {type(initial_conversation_item)}")
     logger.info(f"DEBUG: Value of initial_conversation_item before dump:\n{initial_conversation_item}")
-    # ============================================
-
+    # --- Ende Debugging ---
     try:
-        # Hier tritt der Fehler auf
+        # Sende die initiale Nachricht
         await openai_ws.send(json.dumps(initial_conversation_item))
-        logger.info("Initial conversation item sent successfully.") # Falls es doch klappt
+        logger.info("Initial conversation item sent successfully.")
 
+        # Fordere explizit Antwort an
         logger.info("Sending response.create for initial greeting.")
         await openai_ws.send(json.dumps({"type": "response.create"}))
 
     except TypeError as e:
+         # Logge den Fehler und die Struktur, die Probleme machte
          logger.error(f"!!! JSON dump failed in send_initial_conversation_item: {e}", exc_info=True)
-         # Logge die Struktur erneut, um sicherzugehen
          logger.error(f"Problematic structure was: {initial_conversation_item}")
-
     except Exception as e:
         logger.error(f"Error sending initial item or response.create: {e}", exc_info=True)
 
+
 async def send_session_update(openai_ws):
+    """Sendet das Session Update mit Tools an OpenAI."""
     logger.info("Preparing session update with tools.")
     session_update = {
         "type": "session.update",
@@ -487,39 +515,41 @@ async def send_session_update(openai_ws):
 
     serialized_data = None
     try:
-        # Schritt 1: Versuche zu serialisieren
+        # Serialisiere zuerst
         serialized_data = json.dumps(session_update)
-        logger.info("DEBUG: JSON serialization successful.")
+        logger.info("DEBUG: JSON serialization of session_update successful.")
 
-        # Schritt 2: Logge die serialisierte Nachricht (als String)
+        # Logge den serialisierten String
         logger.info(f"Sending session update to OpenAI: {serialized_data}")
 
-        # Schritt 3: Sende die bereits serialisierte Nachricht
+        # Sende den serialisierten String
         await openai_ws.send(serialized_data)
         logger.info("Session update sent successfully.")
 
-        # Schritt 4: Fahre fort
+        # Fahre erst fort, wenn das Senden erfolgreich war
         await send_initial_conversation_item(openai_ws)
 
     except TypeError as e:
+        # Fange den JSON-Fehler ab
         logger.error(f"!!! JSON dump failed in send_session_update: {e}", exc_info=True)
-        # Logge die ursprüngliche Struktur, um das problematische Element zu finden
         logger.error(f"Problematic structure was: {session_update}")
-        # Optional: Logge die Typen wie im vorherigen Debugging-Schritt
+        # Logge Typen zur weiteren Diagnose
         logger.info(f"DEBUG: Type of VOICE: {type(VOICE)}")
         logger.info(f"DEBUG: Type of SYSTEM_MESSAGE: {type(SYSTEM_MESSAGE)}")
         logger.info(f"DEBUG: Type of GET_CURRENT_DATE_TOOL: {type(GET_CURRENT_DATE_TOOL)}")
-        # ... tiefere Prüfung ...
+        # Beende die Verbindung oder handle den Fehler anders
+        if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
+            await openai_ws.close(code=1011, reason="JSON serialization error during session update")
+        raise e # Wirft den Fehler weiter, um den Handler zu beenden
 
-    except Exception as e: # Fange andere Fehler beim Senden ab
+    except Exception as e:
         logger.error(f"Error sending session update or calling initial item: {e}", exc_info=True)
+        if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
+            await openai_ws.close(code=1011, reason="Error during session update/initial send")
+        raise e # Wirft den Fehler weiter
 
 if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting FastAPI server on 0.0.0.0:{PORT}")
-    # === WICHTIG: Passe ggf. die Anzahl der Uvicorn Worker an ===
-    # Wenn uvicorn mit mehreren Workern läuft (z.B. durch --workers 4),
-    # können asyncio Events / shared state problematisch werden.
-    # Teste explizit mit einem Worker:
+    # Explizit mit einem Worker starten, um Probleme mit asyncio Events/State zu vermeiden
     uvicorn.run(app, host="0.0.0.0", port=PORT, workers=1)
-    # ==========================================================
