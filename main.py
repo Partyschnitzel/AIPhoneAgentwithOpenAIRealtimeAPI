@@ -301,15 +301,24 @@ async def handle_media_stream(websocket: WebSocket):
                         if response_type == 'response.audio.delta' and 'delta' in response:
                             # Jetzt können wir sicher sein, dass stream_sid gesetzt ist.
                             # Wir brauchen nur noch den WebSocket-Status zu prüfen.
-                           if response_type == 'response.audio.delta' and 'delta' in response:
                             is_sid_set = bool(stream_sid)
                             # === KORRIGIERTE PRÜFUNG ===
                             is_ws_open = websocket.client_state == WebSocketState.CONNECTED
 
                             logger.debug(f"Audio Delta Check: stream_sid set? {is_sid_set} (value='{stream_sid}'), websocket connected? {is_ws_open} (state='{websocket.client_state}')")
 
-                            if is_sid_set and is_ws_open:
-                                await websocket.send_json(audio_delta)
+                            if is_sid_set and is_ws_connected:
+                                audio_payload = response['delta']
+                                # HIER fehlt die Definition von audio_delta!
+                                # Es sollte so aussehen:
+                                audio_delta = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {
+                                        "payload": audio_payload
+                                    }
+                                 }
+                                await websocket.send_json(audio_delta) # Zeile ~312
 
                                 if response_start_timestamp_twilio is None:
                                     response_start_timestamp_twilio = latest_media_timestamp
