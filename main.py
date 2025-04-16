@@ -199,18 +199,35 @@ async def handle_media_stream(websocket: WebSocket):
                          else:
                             logger.debug(f"Received unhandled Twilio event in loop: {event}")
 
-                except WebSocketDisconnect as e:
-                    logger.info(f"Twilio WebSocket disconnected during main loop. Code: {e.code}, Reason: {e.reason}")
+                except websockets.exceptions.WebSocketException as e:
+                     logger.error(f"Failed to connect to OpenAI WebSocket: {e}", exc_info=True)
+                     # Stelle sicher, dass die Twilio-Verbindung auch hier geschlossen wird
+                     if websocket.client_state != WebSocketState.DISCONNECTED:
+                         try:
+                             await websocket.close(code=1011, reason="OpenAI connection failed")
+                             logger.info("Closed Twilio WebSocket due to OpenAI connection failure.")
+                         except RuntimeError: # Fange den Fehler ab, falls schon geschlossen
+                             pass
                 except Exception as e:
-                    logger.error(f"Error in receive_from_twilio main loop: {e}", exc_info=True)
-                finally:
-                    logger.info("receive_from_twilio task finished (main loop section).")
-                    if not stream_sid_ready.is_set():
-                         logger.warning("receive_from_twilio: Setting stream_sid_ready event in main loop finally block (should not happen).")
-                         stream_sid_ready.set()
-                    if openai_ws.state == websockets.protocol.State.OPEN:
-                        logger.info("Closing OpenAI WebSocket from receive_from_twilio finally block.")
-                        await openai_ws.close(code=1000, reason="Twilio receive task ended")
+                    logger.error(f"An unexpected error occurred in handle_media_stream: {e}", exc_info=True)
+                    # Stelle sicher, dass die Twilio-Verbindung auch hier geschlossen wird
+                    if websocket.client_state != WebSocketState.DISCONNECTED:
+                         try:
+                             await websocket.close(code=1011, reason="Unexpected handler error")
+                             logger.info("Closed Twilio WebSocket due to unexpected handler error.")
+                         except RuntimeError: # Fange den Fehler ab, falls schon geschlossen
+                              pass
+    finally:
+        logger.info("Final cleanup in handle_media_stream.")
+        # Prüfe hier ZULETZT, ob die Twilio-Verbindung noch offen ist, bevor du schließt
+        if websocket.client_state != WebSocketState.DISCONNECTED:
+             logger.info("Closing Twilio WebSocket in final finally block.")
+             try:
+                 await websocket.close(code=1000, reason="Handler finished normally")
+             except RuntimeError: # Fange den Fehler ab, falls sie *genau jetzt* von anderer Seite geschlossen wurde
+                 logger.warning("Tried to close Twilio WebSocket in final finally block, but it was already closed.")
+        else:
+            logger.info("Twilio WebSocket already closed before final finally block.")
 
             async def send_to_twilio():
                 nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio, current_function_calls
