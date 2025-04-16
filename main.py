@@ -9,14 +9,6 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
 from dotenv import load_dotenv
 import logging
-import datetime
-import http.client
-import urllib.parse
-import requests
-import time
-import random
-from datetime import date
-from datetime import timedelta
 
 print(websockets.__version__)
 
@@ -43,10 +35,8 @@ app = FastAPI()
 if not OPENAI_API_KEY:
     raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 
-
-def get_current_date():
+def getDateToday(optional = True):
     return date.today().strftime('%Y-%m-%d')
-
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
@@ -169,54 +159,6 @@ async def handle_media_stream(websocket: WebSocket):
 
                         await send_mark(websocket, stream_sid)
 
-                    # --- NEU: TOOL CALL VERARBEITUNG ---
-                    elif response.get('type') == 'tool_calls' and 'tool_calls' in response:
-                        logger.info("Received tool_calls event from OpenAI.")
-                        tool_results = []
-                        for tool_call in response['tool_calls']:
-                            if tool_call['type'] == 'function':
-                                function_name = tool_call['function']['name']
-                                tool_call_id = tool_call['id']  # Wichtig!
-
-                                logger.info(f"AI requests to call function: {function_name}")
-
-                                if function_name == "get_current_date":
-                                    try:
-                                        # Rufe die lokale Funktion auf
-                                        current_date = getDateToday()
-                                        logger.info(f"Executed get_current_date(), result: {current_date}")
-                                        # Bereite das Ergebnis für OpenAI vor
-                                        tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_call_id": tool_call_id,
-                                            "result": current_date  # Ergebnis als String
-                                        })
-                                    except Exception as e:
-                                        logger.error(f"Error executing tool {function_name}: {e}")
-                                        # Sende Fehler zurück (optional, aber hilfreich)
-                                        tool_results.append({
-                                            "type": "tool_result",
-                                            "tool_call_id": tool_call_id,
-                                            "error": f"Fehler beim Abrufen des Datums: {e}"
-                                        })
-                                else:
-                                    logger.warning(f"Received request for unknown tool: {function_name}")
-                                    # Optional: Sende einen Fehler für unbekannte Tools
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_call_id": tool_call_id,
-                                        "error": f"Unbekanntes Werkzeug angefordert: {function_name}"
-                                    })
-
-                        # Sende alle gesammelten Tool-Ergebnisse an OpenAI
-                        if tool_results and openai_ws.open:
-                            for result_msg in tool_results:
-                                logger.info(f"Sending tool_result to OpenAI: {result_msg}")
-                                await openai_ws.send(json.dumps(result_msg))
-                        elif not openai_ws.open:
-                            logger.warning("OpenAI WebSocket closed, cannot send tool results.")
-                            break  # Beende die Schleife
-
                     # Trigger an interruption. Your use case might work better using `input_audio_buffer.speech_stopped`, or combining the two.
                     if response.get('type') == 'input_audio_buffer.speech_started':
                         print("Speech started detected.")
@@ -302,20 +244,6 @@ async def send_session_update(openai_ws):
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
             "temperature": 0.8,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_current_date",
-                        "description": "Ruft das aktuelle Datum im Format YYYY-MM-DD ab.",
-                        "parameters": {  # Keine Parameter benötigt
-                            "type": "object",
-                            "properties": {},
-                            "required": []
-                        }
-                    }
-                }
-            ],
         }
     }
     print('Sending session update:', json.dumps(session_update))
