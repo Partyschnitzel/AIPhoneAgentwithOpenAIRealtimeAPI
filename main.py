@@ -457,7 +457,7 @@ async def handle_media_stream(websocket: WebSocket):
             async def send_mark(connection, stream_sid_local):
                 """Sends a mark event to Twilio to track audio buffering."""
                  # === KORRIGIERTE PRÜFUNG ===
-                 if stream_sid_local and connection.client_state == WebSocketState.CONNECTED:
+                if stream_sid_local and connection.client_state == WebSocketState.CONNECTED:
                     mark_name = f"response_part_{len(mark_queue)}"
                     mark_event = {
                         "event": "mark",
