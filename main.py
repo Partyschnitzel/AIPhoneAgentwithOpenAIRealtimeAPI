@@ -10,6 +10,8 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from dotenv import load_dotenv
 import logging
+import asyncio # Sicherstellen, dass asyncio importiert ist
+
 
 print(f"Websockets version: {websockets.__version__}") # <-- Verbessertes Logging
 
@@ -126,6 +128,7 @@ async def handle_media_stream(websocket: WebSocket):
             # --- State für Tool Calling ---
             current_function_calls = {} # Speichert Infos zu laufenden Funktionsaufrufen {call_id: {"name": "...", "arguments": "..."}}
             # --- Ende State für Tool Calling ---
+            stream_sid_ready = asyncio.Event()
 
             async def receive_from_twilio():
                 """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
@@ -151,7 +154,7 @@ async def handle_media_stream(websocket: WebSocket):
                                 "type": "input_audio_buffer.append",
                                 "audio": data['media']['payload']
                             }
-                            await openai_ws.send(json.dumps(audio_append))
+                            pass
                         elif event == 'start':
                             stream_sid = data['start']['streamSid']
                             logger.info(f"Twilio media stream started: {stream_sid}")
@@ -184,6 +187,9 @@ async def handle_media_stream(websocket: WebSocket):
                     logger.error(f"Error in receive_from_twilio: {e}", exc_info=True)
                 finally:
                     logger.info("receive_from_twilio task finished.")
+                    if not stream_sid_ready.is_set():
+                        logger.info("receive_from_twilio: Setting stream_sid_ready event in finally block (in case of early exit).")
+                        stream_sid_ready.set() # Sicherstellen, dass der andere Task nicht ewig wartet
                     if openai_ws.state == websockets.protocol.State.OPEN:
                         logger.info("Closing OpenAI WebSocket from receive_from_twilio finally block.")
                         await openai_ws.close(code=1000, reason="Twilio receive task ended")
@@ -193,6 +199,19 @@ async def handle_media_stream(websocket: WebSocket):
                 """Receive events from the OpenAI Realtime API, send audio back to Twilio, handle tool calls."""
                 nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio, current_function_calls
                 try:
+                    # === NEU: Warte auf das stream_sid_ready Event ===
+                    logger.info("send_to_twilio: Waiting for stream_sid to be set...")
+                    try:
+                        # Timeout hinzufügen, falls etwas schiefgeht (z.B. 10 Sekunden)
+                        await asyncio.wait_for(stream_sid_ready.wait(), timeout=10.0)
+                        logger.info(f"send_to_twilio: stream_sid is ready (value: {stream_sid}). Proceeding.")
+                    except asyncio.TimeoutError:
+                        logger.error("send_to_twilio: Timed out waiting for stream_sid! Cannot proceed with sending audio.")
+                        # Hier könnten wir entscheiden, die Verbindung zu schließen oder anders zu reagieren.
+                        # Fürs Erste beenden wir diesen Task.
+                        return
+                    # =================================================
+
                     async for openai_message in openai_ws:
                         try:
                             response = json.loads(openai_message)
@@ -225,23 +244,17 @@ async def handle_media_stream(websocket: WebSocket):
 
                         # --- Audio an Twilio senden ---
                         if response_type == 'response.audio.delta' and 'delta' in response:
-                            # == NEUE PRÜFUNG ==
-                            # Prüfe explizit, ob stream_sid gesetzt ist, BEVOR versucht wird zu senden.
-                            if not stream_sid:
-                                logger.warning(f"Dropping audio delta because stream_sid is not set yet. State: {websocket.client_state}")
-                                continue # Überspringe diesen Audio-Chunk
-
-                            # Prüfe danach den WebSocket-Status
+                            # Jetzt können wir sicher sein, dass stream_sid gesetzt ist.
+                            # Wir brauchen nur noch den WebSocket-Status zu prüfen.
                             if websocket.client_state == websockets.protocol.State.OPEN:
-                                audio_payload = response['delta'] # Ist bereits base64 encoded von OpenAI
+                                audio_payload = response['delta']
                                 audio_delta = {
                                     "event": "media",
-                                    "streamSid": stream_sid, # stream_sid ist hier garantiert nicht None
+                                    "streamSid": stream_sid, # stream_sid ist garantiert nicht None
                                     "media": {
                                         "payload": audio_payload
                                     }
-                                 }
-                                # logger.debug("Sending audio delta to Twilio.") # Optional
+                                }
                                 await websocket.send_json(audio_delta)
 
                                 if response_start_timestamp_twilio is None:
