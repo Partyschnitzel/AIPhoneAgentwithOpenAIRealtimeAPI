@@ -135,44 +135,61 @@ async def handle_media_stream(websocket: WebSocket):
                 nonlocal stream_sid, latest_media_timestamp # ... und andere
                 nonlocal stream_sid_ready # Explizit machen schadet nicht
 
-                # === NEU: Start-Nachricht separat empfangen ===
+                connected_received = False
+                start_received = False
+
                 try:
-                    logger.info("receive_from_twilio: Waiting for the first message (expecting 'start')...")
-                    start_message = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
-                    start_data = json.loads(start_message)
+                    # === NEU: Schleife für die ersten beiden Nachrichten (connected, start) ===
+                    logger.info("receive_from_twilio: Waiting for initial 'connected' and 'start' messages...")
+                    for _ in range(2): # Erwarte maximal 2 initiale Nachrichten
+                        message_text = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+                        data = json.loads(message_text)
+                        event = data.get('event')
+                        logger.info(f"receive_from_twilio: Received initial message: {event}")
 
-                    if start_data.get('event') == 'start':
-                        stream_sid = start_data['start']['streamSid']
-                        logger.info(f"receive_from_twilio: 'start' event processed. stream_sid: {stream_sid}")
+                        if event == 'connected':
+                            logger.info("receive_from_twilio: 'connected' event confirmed.")
+                            connected_received = True
+                        elif event == 'start':
+                            stream_sid = data['start']['streamSid']
+                            logger.info(f"receive_from_twilio: 'start' event processed. stream_sid: {stream_sid}")
+                            start_received = True
 
-                        # Reset state variables
-                        response_start_timestamp_twilio = None
-                        latest_media_timestamp = 0
-                        last_assistant_item = None
-                        current_function_calls.clear()
-                        logger.info("receive_from_twilio: State variables reset.")
+                            # Reset state variables erst nach dem 'start' Event
+                            response_start_timestamp_twilio = None
+                            latest_media_timestamp = 0
+                            last_assistant_item = None
+                            current_function_calls.clear()
+                            logger.info("receive_from_twilio: State variables reset.")
 
-                        # Signalisiere, dass stream_sid gesetzt ist
-                        logger.info("receive_from_twilio: Setting stream_sid_ready event.")
-                        stream_sid_ready.set()
-                    else:
-                        logger.error(f"receive_from_twilio: Received unexpected first message: {start_data}")
-                        # Event setzen, um Deadlock zu verhindern, aber Fehler anzeigen
-                        stream_sid_ready.set()
-                        return # Task beenden oder Fehler behandeln
+                            # Signalisiere, dass stream_sid gesetzt ist
+                            logger.info("receive_from_twilio: Setting stream_sid_ready event.")
+                            stream_sid_ready.set()
+                            # Breche die initiale Schleife ab, da wir 'start' haben
+                            break
+                        else:
+                            logger.warning(f"receive_from_twilio: Received unexpected initial message: {data}")
+
+                    # Überprüfe, ob 'start' empfangen wurde
+                    if not start_received:
+                         logger.error("receive_from_twilio: Did not receive 'start' message after initial messages.")
+                         if not stream_sid_ready.is_set(): stream_sid_ready.set() # Deadlock verhindern
+                         return # Task beenden
+
+                    # === Ende initiale Nachrichten ===
 
                 except asyncio.TimeoutError:
-                    logger.error("receive_from_twilio: Timed out waiting for 'start' message from Twilio.")
-                    stream_sid_ready.set() # Verhindert Deadlock im anderen Task
-                    return # Task beenden
-                except (json.JSONDecodeError, websockets.exceptions.ConnectionClosedOK, websockets.exceptions.ConnectionClosedError) as e:
-                    logger.error(f"receive_from_twilio: Error receiving/parsing 'start' message: {e}", exc_info=True)
-                    stream_sid_ready.set() # Verhindert Deadlock im anderen Task
-                    return # Task beenden
-                except Exception as e: # Catch-all für unerwartete Fehler
-                    logger.error(f"receive_from_twilio: Unexpected error before loop: {e}", exc_info=True)
-                    stream_sid_ready.set() # Verhindert Deadlock im anderen Task
-                    return # Task beenden
+                    logger.error("receive_from_twilio: Timed out waiting for initial messages from Twilio.")
+                    if not stream_sid_ready.is_set(): stream_sid_ready.set()
+                    return
+                except WebSocketDisconnect as e:
+                     logger.error(f"receive_from_twilio: WebSocket disconnected during initial message handling: {e}", exc_info=True)
+                     if not stream_sid_ready.is_set(): stream_sid_ready.set()
+                     return
+                except (json.JSONDecodeError, Exception) as e: # Breitere Exception-Behandlung
+                    logger.error(f"receive_from_twilio: Error processing initial messages: {e}", exc_info=True)
+                    if not stream_sid_ready.is_set(): stream_sid_ready.set()
+                    return
 
                 # === Ende separate Start-Nachricht ===
 
@@ -226,7 +243,7 @@ async def handle_media_stream(websocket: WebSocket):
                     logger.info("receive_from_twilio task finished (main loop section).")
                     # Sicherstellen, dass das Event gesetzt ist, falls es einen Ausstieg gab
                     if not stream_sid_ready.is_set():
-                         logger.warning("receive_from_twilio: Setting stream_sid_ready event in main loop finally block (should not happen if start was processed).")
+                         logger.warning("receive_from_twilio: Setting stream_sid_ready event in main loop finally block (should not happen).")
                          stream_sid_ready.set()
                     if openai_ws.state == websockets.protocol.State.OPEN:
                         logger.info("Closing OpenAI WebSocket from receive_from_twilio finally block.")
