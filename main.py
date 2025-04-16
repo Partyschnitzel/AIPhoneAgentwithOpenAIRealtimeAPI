@@ -202,25 +202,30 @@ async def handle_media_stream(websocket: WebSocket):
                                       mark_queue.pop(0)
                                  except IndexError:
                                       logger.warning("Mark queue was empty when trying to pop.")                         
-                             elif event == 'stop':
-                                 logger.info("Twilio call stopped event received in loop. Closing connections.")
+                             if event == 'stop':
+                                logger.info("Twilio call stopped event received in loop.") # Nur loggen
                              if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
                                  logger.info("Closing OpenAI WebSocket due to Twilio stop event.")
-                                 await openai_ws.close(code=1000, reason="Twilio call ended")
+                                 #await openai_ws.close(code=1000, reason="Twilio call ended")
+                             # === NEU: Log, wenn die Schleife normal endet ===
+                             logger.info("receive_from_twilio: iter_text loop finished WITHOUT stop event or exception.")
+                             # ===============================================
                              return # Stop this task
-                         # else: logger.debug(f"Unhandled Twilio event in loop: {event}")
+                             # else: logger.debug(f"Unhandled Twilio event in loop: {event}")
 
                 except WebSocketDisconnect as e:
                     logger.info(f"Twilio WebSocket disconnected during main loop. Code: {e.code}")
                 except Exception as e:
                     logger.error(f"Error in receive_from_twilio main loop: {e}", exc_info=True)
                 finally:
-                    logger.info("receive_from_twilio task finished (main loop section).")
-                    # Stelle sicher, dass das Event gesetzt ist, falls Task frühzeitig endet
+                    # === Angepasstes Finally ===
+                    logger.info("receive_from_twilio task finished (exiting main loop section).")
+                    # Event setzen, falls es noch nicht geschehen ist (Sicherheitsnetz)
                     if not stream_sid_ready.is_set():
                          logger.warning("receive_from_twilio: Setting stream_sid_ready event in finally block.")
                          stream_sid_ready.set()
-                    # Schließe OpenAI WS NICHT hier, wird von außen gehandhabt
+                    # OpenAI WS NICHT hier schließen. Wird im äußeren Handler gemacht.
+                    # =========================
 
             async def send_to_twilio():
                 """Empfängt von OpenAI, sendet Audio, verarbeitet Tool Calls."""
