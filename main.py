@@ -193,12 +193,17 @@ async def handle_media_stream(websocket: WebSocket):
                                  "type": "input_audio_buffer.append",
                                  "audio": data['media']['payload']
                              }
-                             await openai_ws.send(json.dumps(audio_append))
+                             await openai_ws.send(json.dumps(audio_append))                        
                          elif event == 'mark':
-                             # ... (Mark-Verarbeitung) ...
-                             if mark_queue: try: mark_queue.pop(0) except IndexError: pass
-                         elif event == 'stop':
-                             logger.info("Twilio call stopped event received in loop. Closing connections.")
+                             mark_name = data.get('mark', {}).get('name')
+                             logger.debug(f"Received mark event: {mark_name}")
+                             if mark_queue:
+                                 try:
+                                      mark_queue.pop(0)
+                                 except IndexError:
+                                      logger.warning("Mark queue was empty when trying to pop.")                         
+                             elif event == 'stop':
+                                 logger.info("Twilio call stopped event received in loop. Closing connections.")
                              if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
                                  logger.info("Closing OpenAI WebSocket due to Twilio stop event.")
                                  await openai_ws.close(code=1000, reason="Twilio call ended")
