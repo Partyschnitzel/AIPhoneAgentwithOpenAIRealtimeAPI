@@ -344,69 +344,52 @@ async def handle_media_stream(websocket: WebSocket):
                         if response_type == 'response.function_call_arguments.delta':
                              call_id = response.get('call_id')
                              delta = response.get('delta')
-                             name = response.get('name')
                              if call_id and delta is not None:
+                                 # Initialisiere nur mit leeren Argumenten, speichere den Namen noch NICHT
                                  if call_id not in current_function_calls:
-                                     current_function_calls[call_id] = {"name": name, "arguments": ""}
-                                     logger.info(f"Starting function call {call_id} for tool '{name}'")
+                                     current_function_calls[call_id] = {"name": None, "arguments": ""} # Name ist erstmal None
+                                     logger.info(f"Receiving arguments for function call {call_id}...") # Angepasstes Log
                                  current_function_calls[call_id]["arguments"] += delta
-                                 # logger.debug(f"Accumulated args for {call_id}: {current_function_calls[call_id]['arguments']}") # Optional
 
                         elif response_type == 'response.function_call_arguments.done':
                             call_id = response.get('call_id')
+                            # Hol den Namen ZUERST aus dem DONE Event
+                            function_name_from_event = response.get('name')
+
                             if call_id in current_function_calls:
-                                logger.info(f"Finished receiving arguments for function call {call_id}")
-                                function_call_info = current_function_calls.pop(call_id) # Entferne aus dem State
-                                function_name = function_call_info['name']
+                                # Aktualisiere den Namen im State (oder setze ihn hier final)
+                                current_function_calls[call_id]["name"] = function_name_from_event
+                                logger.info(f"Finished receiving arguments for function call {call_id}, Name: '{function_name_from_event}'")
+
+                                function_call_info = current_function_calls.pop(call_id)
+                                function_name = function_call_info['name'] # Jetzt der korrekte Name
                                 arguments_str = function_call_info['arguments']
                                 logger.info(f"Executing tool: {function_name} with args: {arguments_str}")
 
-                                # Führe die Funktion aus
-                                if function_name in AVAILABLE_TOOLS:
+                                if function_name and function_name in AVAILABLE_TOOLS: # Prüfe ob Name nicht None ist
                                     try:
-                                        # Versuche Argumente zu parsen (für diese Funktion nicht nötig, aber generell sinnvoll)
-                                        # arguments_json = json.loads(arguments_str) if arguments_str else {}
                                         tool_function = AVAILABLE_TOOLS[function_name]
-                                        # Führe die Funktion aus (hier ohne Argumente)
                                         result = tool_function()
-                                        output_str = str(result) # Sicherstellen, dass es ein String ist
+                                        output_str = str(result)
                                         logger.info(f"Tool '{function_name}' executed successfully. Result: {output_str}")
 
-                                        # Sende das Ergebnis an OpenAI
-                                        # Format basierend auf Forum-Feedback
-                                        function_output_item = {
-                                            "type": "conversation.item.create",
-                                            "item": {
-                                                "type": "function_call_output",
-                                                "call_id": call_id,
-                                                "output": output_str # Ergebnis als String senden
-                                                # 'status': 'completed' ist laut Doku nicht hier, sondern im function_call_output content, aber andere User haben es so gemacht
-                                            }
-                                        }
+                                        # Ergebnis senden
+                                        function_output_item = { ... } # Wie gehabt
                                         logger.info(f"Sending function_call_output for {call_id} to OpenAI.")
                                         await openai_ws.send(json.dumps(function_output_item))
 
-                                        # !!! WICHTIG: Fordere explizit eine neue Antwort an !!!
-                                        # Basierend auf Forum-Feedback (liquidshadowsmk, j0rdan, 914099943)
-                                        response_create_item = {
-                                            "type": "response.create"
-                                            # Optional: "response": {"instructions": "Antworte dem Nutzer mit dem Ergebnis."}
-                                            # Aber das einfachste scheint zu funktionieren.
-                                        }
-                                        logger.info(f"Sending response.create to trigger AI response after tool call {call_id}.")
+                                        # Neue Antwort anfordern
+                                        response_create_item = {"type": "response.create"}
+                                        logger.info(f"Sending response.create after tool call {call_id}.")
                                         await openai_ws.send(json.dumps(response_create_item))
 
                                     except Exception as e:
-                                        logger.error(f"Error executing tool '{function_name}' or sending result: {e}", exc_info=True)
-                                        # Sende ggf. eine Fehlermeldung zurück an OpenAI? (Komplexer)
-                                        # Vorerst loggen wir nur den Fehler.
+                                        logger.error(f"Error executing tool '{function_name}': {e}", exc_info=True)
                                 else:
-                                    logger.warning(f"Received request for unknown tool: {function_name}")
-                                    # Was tun? Evtl. Fehlermeldung an OpenAI senden?
-
+                                    # Diese Warnung sollte jetzt nur noch bei wirklich unbekannten Tools kommen
+                                    logger.warning(f"Received request for unknown or unnamed tool: {function_name}")
                             else:
-                                logger.warning(f"Received function_call_arguments.done for unknown or already processed call_id: {call_id}")
-                        # --- Ende Tool Calling Logik ---
+                                logger.warning(f"Received function_call_arguments.done for unknown call_id: {call_id}")
 
                 except websockets.exceptions.ConnectionClosedOK:
                     logger.info("OpenAI WebSocket connection closed normally.")
