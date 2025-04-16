@@ -417,10 +417,40 @@ async def handle_media_stream(websocket: WebSocket):
 
 async def send_initial_conversation_item(openai_ws):
     logger.info("Sending initial conversation item to start the conversation.")
-    initial_conversation_item = { ... } # Wie gehabt
-    await openai_ws.send(json.dumps(initial_conversation_item))
-    logger.info("Sending response.create for initial greeting.")
-    await openai_ws.send(json.dumps({"type": "response.create"}))
+    initial_conversation_item = {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Stell dich als James von Couture & Pixels vor und frage, wie du helfen kannst."
+                }
+            ]
+        }
+    }
+
+    # === NEU: Debugging direkt vor dem Fehler ===
+    logger.info(f"DEBUG: Type of initial_conversation_item: {type(initial_conversation_item)}")
+    logger.info(f"DEBUG: Value of initial_conversation_item before dump:\n{initial_conversation_item}")
+    # ============================================
+
+    try:
+        # Hier tritt der Fehler auf
+        await openai_ws.send(json.dumps(initial_conversation_item))
+        logger.info("Initial conversation item sent successfully.") # Falls es doch klappt
+
+        logger.info("Sending response.create for initial greeting.")
+        await openai_ws.send(json.dumps({"type": "response.create"}))
+
+    except TypeError as e:
+         logger.error(f"!!! JSON dump failed in send_initial_conversation_item: {e}", exc_info=True)
+         # Logge die Struktur erneut, um sicherzugehen
+         logger.error(f"Problematic structure was: {initial_conversation_item}")
+
+    except Exception as e:
+        logger.error(f"Error sending initial item or response.create: {e}", exc_info=True)
 
 async def send_session_update(openai_ws):
     logger.info("Preparing session update with tools.")
