@@ -138,7 +138,7 @@ async def handle_media_stream(websocket: WebSocket):
                 # === NEU: Start-Nachricht separat empfangen ===
                 try:
                     logger.info("receive_from_twilio: Waiting for the first message (expecting 'start')...")
-                    start_message = await asyncio.wait_for(websocket.recv(), timeout=10.0) # Timeout hinzufügen
+                    start_message = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
                     start_data = json.loads(start_message)
 
                     if start_data.get('event') == 'start':
