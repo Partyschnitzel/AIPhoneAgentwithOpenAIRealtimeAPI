@@ -123,7 +123,7 @@ async def handle_media_stream(websocket: WebSocket):
                         logger.error(f"JSON-Fehler: {e} - Nachricht: {message}")
                         continue
                         
-                    if data['event'] == 'media' and openai_ws.open:
+                    if data['event'] == 'media' and openai_ws.state == websockets.protocol.State.OPEN:
                         latest_media_timestamp = int(data['media']['timestamp'])
                         audio_append = {
                             "type": "input_audio_buffer.append",
@@ -141,19 +141,19 @@ async def handle_media_stream(websocket: WebSocket):
                             mark_queue.pop(0)
                     elif data['event'] == 'stop':
                         logger.info("Twilio call ended. Closing connections.")
-                        if openai_ws.open:
+                        if openai_ws.state == websockets.protocol.State.OPEN:
                             logger.info("Closing OpenAI WebSocket.")
                             await openai_ws.close()
                         break
                         
             except WebSocketDisconnect:
                 logger.info("Client disconnected.")
-                if openai_ws.open:
+                if openai_ws.state == websockets.protocol.State.OPEN:
                     await openai_ws.close()
                     
             except Exception as e:
                 logger.error(f"Error in receive_from_twilio: {e}")
-                if openai_ws.open:
+                if openai_ws.state == websockets.protocol.State.OPEN:
                     await openai_ws.close()
 
         async def handle_tool_call(tool_call):
