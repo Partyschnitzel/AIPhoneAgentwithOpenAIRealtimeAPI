@@ -14,9 +14,7 @@ import http.client
 import urllib.parse
 import requests
 import time
-import imghdr
 import random
-import openai
 import replicate
 from datetime import date
 from datetime import timedelta
