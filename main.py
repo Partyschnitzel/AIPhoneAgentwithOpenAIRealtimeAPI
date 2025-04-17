@@ -101,6 +101,10 @@ class ConversationTracker:
     def _send_email_summary(self, summary):
         """Sendet die Zusammenfassung per E-Mail."""
         try:
+            # Debug-Logging der verwendeten SMTP-Konfiguration
+            logger.info(f"Sending email using SMTP server: {EMAIL_SMTP_SERVER}:{EMAIL_SMTP_PORT}")
+            logger.info(f"From: {EMAIL_SENDER}, To: {EMAIL_RECIPIENT}")
+
             msg = MIMEMultipart()
             msg['From'] = EMAIL_SENDER
             msg['To'] = EMAIL_RECIPIENT
@@ -109,15 +113,57 @@ class ConversationTracker:
 
             msg.attach(MIMEText(summary, 'plain'))
 
+            # Verwende die konfigurierte SMTP-Server-Einstellung
             server = smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
-            server.starttls()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.set_debuglevel(1)  # Aktiviere SMTP-Debug-Ausgabe
+
+            # Prüfe, ob TLS benötigt wird (die meisten Server benötigen es)
+            try:
+                server.starttls()
+                logger.info("STARTTLS successful")
+            except Exception as tls_error:
+                logger.warning(f"STARTTLS not supported or failed: {tls_error}")
+
+            # Prüfe, ob Authentifizierung konfiguriert ist
+            if EMAIL_PASSWORD:
+                logger.info(f"Authenticating with username: {EMAIL_SENDER}")
+                server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+                logger.info("Authentication successful")
+            else:
+                logger.info("No password provided, skipping authentication")
+
             server.send_message(msg)
+            logger.info("Email message sent")
             server.quit()
 
             logger.info(f"E-Mail-Zusammenfassung erfolgreich gesendet an {EMAIL_RECIPIENT}")
         except Exception as e:
             logger.error(f"Fehler beim Senden der E-Mail: {e}", exc_info=True)
+            # Versuche alternativen E-Mail-Versand als Fallback
+            try:
+                logger.info("Attempting alternative email sending method...")
+                from_addr = EMAIL_SENDER
+                to_addr = EMAIL_RECIPIENT
+                email_text = f"Subject: James KI-Butler: Anrufzusammenfassung\n\n{summary}"
+
+                with smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT) as server:
+                    server.set_debuglevel(1)
+                    # Optional TLS
+                    try:
+                        server.starttls()
+                    except:
+                        logger.info("Alternative method: STARTTLS not used")
+
+                    # Optional Authentication
+                    if EMAIL_PASSWORD:
+                        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+
+                    # Senden
+                    server.sendmail(from_addr, to_addr, email_text)
+
+                logger.info("Alternative email method successful")
+            except Exception as alt_e:
+                logger.error(f"Alternative email method also failed: {alt_e}", exc_info=True)
 
 
 print(f"Websockets version: {websockets.__version__}")
