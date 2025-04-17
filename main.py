@@ -659,145 +659,128 @@ async def handle_media_stream(websocket: WebSocket):
                                     logger.info(f"USER TRANSCRIPT found in {response_type}: {transcript}")
                                     conversation_tracker.add_user_message(transcript)
 
-                                # Prüfe auf Transkripte in verschachtelten Strukturen
-                                if response_type == 'input_audio_buffer.committed':
-                                    if 'transcript' in response:
+                                    # Transkripterfassung für Benutzer-Eingaben
+                                    if response_type == 'input_audio_buffer.committed':
+                                        try:
+                                            transcript = None
+
+                                            # Methode 1: Versuche transcript direkt aus dem Event zu extrahieren
+                                            if 'transcript' in response:
+                                                transcript = response.get('transcript')
+
+                                            # Methode 2: Manchmal ist das Transkript in metadata
+                                            elif 'metadata' in response and response.get(
+                                                    'metadata') and 'transcript' in response.get('metadata', {}):
+                                                transcript = response.get('metadata', {}).get('transcript')
+
+                                            # Methode 3: Versuche bei bestimmten Events transkripte aus der API abzurufen
+                                            elif 'item_id' in response:
+                                                item_id = response.get('item_id')
+                                                # Verwende die korrekte API
+                                                transcript_query = {
+                                                    "type": "conversation.item.retrieve",
+                                                    "item_id": item_id
+                                                }
+                                                logger.info(f"Requesting transcript for user item: {item_id}")
+                                                await openai_ws.send(json.dumps(transcript_query))
+                                                # Hinweis: Die Antwort wird im Handler für conversation.item.retrieve.response verarbeitet
+
+                                            # Wenn wir direkt ein Transkript haben, speichere es
+                                            if transcript:
+                                                logger.info(f"Adding user transcript (direct): {transcript}")
+                                                conversation_tracker.add_user_message(transcript)
+
+                                        except Exception as e:
+                                            logger.error(f"Error processing user input: {e}", exc_info=True)
+
+                                    # Verarbeitung der Transkript-Antwort
+                                    if response_type == 'conversation.item.retrieve.response':  # Entsprechend angepasst
+                                        try:
+                                            item = response.get('item', {})
+                                            if item.get('role') == 'user' and item.get('content'):
+                                                user_text = ""
+                                                for content in item.get('content', []):
+                                                    if content.get('type') in ['text', 'transcription'] and content.get(
+                                                            'text'):
+                                                        user_text += content.get('text') + " "
+
+                                                if user_text.strip():
+                                                    logger.info(f"Adding user transcript: {user_text.strip()}")
+                                                    conversation_tracker.add_user_message(user_text.strip())
+                                        except Exception as e:
+                                            logger.error(f"Error processing user transcript response: {e}")
+
+                                    # Verarbeite verschiedene Antworttypen für Transkripte
+                                    # Für input_audio_buffer.speech_stopped mit Transkript
+                                    if response_type == 'input_audio_buffer.speech_stopped' and 'transcript' in response:
                                         transcript = response.get('transcript')
-                                        logger.info(f"USER TRANSCRIPT from committed buffer: {transcript}")
-                                        conversation_tracker.add_user_message(transcript)
-                                    elif 'item_id' in response:
-                                        item_id = response.get('item_id')
-                                        logger.info(f"Potential user message item: {item_id} - trying to extract later")
-
-                                # Assistant Transkripte aus audio response
-                                if response_type == 'response.done':
-                                    output = response.get('response', {}).get('output', [])
-                                    for item in output:
-                                        if item.get('role') == 'assistant' and item.get('content'):
-                                            for content in item.get('content', []):
-                                                if content.get('type') == 'audio' and 'transcript' in content:
-                                                    transcript = content.get('transcript')
-                                                    logger.info(
-                                                        f"ASSISTANT TRANSCRIPT from response.done: {transcript}")
-                                                    conversation_tracker.add_assistant_message(transcript)
-                            except Exception as transcript_error:
-                                logger.error(f"Error in transcript extraction: {transcript_error}")
-
-                        # Transkripterfassung für Benutzer-Eingaben
-                        if response_type == 'input_audio_buffer.committed':
-                            try:
-                                transcript = None
-
-                                # Methode 1: Versuche transcript direkt aus dem Event zu extrahieren
-                                if 'transcript' in response:
-                                    transcript = response.get('transcript')
-
-                                # Methode 2: Manchmal ist das Transkript in metadata
-                                elif 'metadata' in response and response.get(
-                                        'metadata') and 'transcript' in response.get('metadata', {}):
-                                    transcript = response.get('metadata', {}).get('transcript')
-
-                                # Methode 3: Versuche bei bestimmten Events transkripte aus der API abzurufen
-                                elif 'item_id' in response:
-                                    item_id = response.get('item_id')
-                                    # Verwende die korrekte API
-                                    transcript_query = {
-                                        "type": "conversation.item.retrieve",
-                                        "item_id": item_id
-                                    }
-                                    logger.info(f"Requesting transcript for user item: {item_id}")
-                                    await openai_ws.send(json.dumps(transcript_query))
-                                    # Hinweis: Die Antwort wird im Handler für conversation.item.retrieve.response verarbeitet
-
-                                # Wenn wir direkt ein Transkript haben, speichere es
-                                if transcript:
-                                    logger.info(f"Adding user transcript (direct): {transcript}")
-                                    conversation_tracker.add_user_message(transcript)
-
-                            except Exception as e:
-                                logger.error(f"Error processing user input: {e}", exc_info=True)
-
-                        # Verarbeitung der Transkript-Antwort
-                        if response_type == 'conversation.item.retrieve.response':  # Entsprechend angepasst
-                            try:
-                                item = response.get('item', {})
-                                if item.get('role') == 'user' and item.get('content'):
-                                    user_text = ""
-                                    for content in item.get('content', []):
-                                        if content.get('type') in ['text', 'transcription'] and content.get('text'):
-                                            user_text += content.get('text') + " "
-
-                                    if user_text.strip():
-                                        logger.info(f"Adding user transcript: {user_text.strip()}")
-                                        conversation_tracker.add_user_message(user_text.strip())
-                            except Exception as e:
-                                logger.error(f"Error processing user transcript response: {e}")
-
-                        # Verarbeite verschiedene Antworttypen für Transkripte
-                        # Für input_audio_buffer.speech_stopped mit Transkript
-                        if response_type == 'input_audio_buffer.speech_stopped' and 'transcript' in response:
-                            transcript = response.get('transcript')
-                            if transcript:
-                                logger.info(f"Adding user transcript from speech_stopped: {transcript}")
-                                conversation_tracker.add_user_message(transcript)
-
-                        # Für Antworten auf conversation.item.retrieve
-                        if response_type in ['conversation.item.retrieve.response', 'conversation.item.response']:
-                            try:
-                                item = response.get('item', {})
-                                if item.get('role') == 'user':
-                                    # Methode 1: direkt in content als Text
-                                    if isinstance(item.get('content'), str):
-                                        transcript = item.get('content')
                                         if transcript:
-                                            logger.info(f"Adding user transcript (string content): {transcript}")
+                                            logger.info(f"Adding user transcript from speech_stopped: {transcript}")
                                             conversation_tracker.add_user_message(transcript)
 
-                                    # Methode 2: In content als Liste von Objekten
-                                    elif isinstance(item.get('content'), list):
-                                        user_text = ""
-                                        for content in item.get('content', []):
-                                            # Verschiedene mögliche Strukturen für Text
-                                            if isinstance(content, str):
-                                                user_text += content + " "
-                                            elif isinstance(content, dict):
-                                                if content.get('type') in ['text', 'transcription',
-                                                                           'audio'] and content.get('text'):
-                                                    user_text += content.get('text') + " "
-                                                elif 'text' in content:
-                                                    user_text += content.get('text') + " "
-                                                elif 'transcript' in content:
-                                                    user_text += content.get('transcript') + " "
+                                    # Für Antworten auf conversation.item.retrieve
+                                    if response_type in ['conversation.item.retrieve.response',
+                                                         'conversation.item.response']:
+                                        try:
+                                            item = response.get('item', {})
+                                            if item.get('role') == 'user':
+                                                # Methode 1: direkt in content als Text
+                                                if isinstance(item.get('content'), str):
+                                                    transcript = item.get('content')
+                                                    if transcript:
+                                                        logger.info(
+                                                            f"Adding user transcript (string content): {transcript}")
+                                                        conversation_tracker.add_user_message(transcript)
 
-                                        if user_text.strip():
-                                            logger.info(f"Adding user transcript (object content): {user_text.strip()}")
-                                            conversation_tracker.add_user_message(user_text.strip())
+                                                # Methode 2: In content als Liste von Objekten
+                                                elif isinstance(item.get('content'), list):
+                                                    user_text = ""
+                                                    for content in item.get('content', []):
+                                                        # Verschiedene mögliche Strukturen für Text
+                                                        if isinstance(content, str):
+                                                            user_text += content + " "
+                                                        elif isinstance(content, dict):
+                                                            if content.get('type') in ['text', 'transcription',
+                                                                                       'audio'] and content.get('text'):
+                                                                user_text += content.get('text') + " "
+                                                            elif 'text' in content:
+                                                                user_text += content.get('text') + " "
+                                                            elif 'transcript' in content:
+                                                                user_text += content.get('transcript') + " "
 
-                                    # Methode 3: In transcript oder text direkt im Item
-                                    elif item.get('transcript'):
-                                        transcript = item.get('transcript')
-                                        logger.info(f"Adding user transcript (item transcript): {transcript}")
-                                        conversation_tracker.add_user_message(transcript)
-                                    elif item.get('text'):
-                                        text = item.get('text')
-                                        logger.info(f"Adding user transcript (item text): {text}")
-                                        conversation_tracker.add_user_message(text)
+                                                    if user_text.strip():
+                                                        logger.info(
+                                                            f"Adding user transcript (object content): {user_text.strip()}")
+                                                        conversation_tracker.add_user_message(user_text.strip())
 
-                            except Exception as e:
-                                logger.error(f"Error processing item response: {e}", exc_info=True)
+                                                # Methode 3: In transcript oder text direkt im Item
+                                                elif item.get('transcript'):
+                                                    transcript = item.get('transcript')
+                                                    logger.info(
+                                                        f"Adding user transcript (item transcript): {transcript}")
+                                                    conversation_tracker.add_user_message(transcript)
+                                                elif item.get('text'):
+                                                    text = item.get('text')
+                                                    logger.info(f"Adding user transcript (item text): {text}")
+                                                    conversation_tracker.add_user_message(text)
 
-                        if response_type not in KNOWN_RESPONSE_TYPES:
-                            logger.info(f"NEW RESPONSE TYPE: {response_type}")
-                            logger.info(f"UNKNOWN RESPONSE DATA: {response}")
-                            # Versuch, relevante Transkripte zu extrahieren
-                            if 'transcript' in response:
-                                transcript = response.get('transcript')
-                                logger.info(f"Found transcript in unknown response: {transcript}")
-                                # Je nach Kontext Benutzer oder Assistent
-                                if 'role' in response and response.get('role') == 'user':
-                                    conversation_tracker.add_user_message(transcript)
-                                else:
-                                    conversation_tracker.add_assistant_message(transcript)
+                                        except Exception as e:
+                                            logger.error(f"Error processing item response: {e}", exc_info=True)
+
+                                    if response_type not in KNOWN_RESPONSE_TYPES:
+                                        logger.info(f"NEW RESPONSE TYPE: {response_type}")
+                                        logger.info(f"UNKNOWN RESPONSE DATA: {response}")
+                                        # Versuch, relevante Transkripte zu extrahieren
+                                        if 'transcript' in response:
+                                            transcript = response.get('transcript')
+                                            logger.info(f"Found transcript in unknown response: {transcript}")
+                                            # Je nach Kontext Benutzer oder Assistent
+                                            if 'role' in response and response.get('role') == 'user':
+                                                conversation_tracker.add_user_message(transcript)
+                                            else:
+                                                conversation_tracker.add_assistant_message(transcript)
+
+                        
                         # Logging und Fehlerbehandlung
                         if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
                             logger.info(f"Received from OpenAI: Type={response_type}, Data={response}")
