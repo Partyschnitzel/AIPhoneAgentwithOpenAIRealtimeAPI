@@ -18,7 +18,7 @@ import requests         # <-- Hinzugefügt für Wetter
 import http.client    # <-- Hinzugefügt für Wetter (PositionStack)
 import urllib.parse   # <-- Hinzugefügt für Wetter (PositionStack)
 import random         # <-- Hinzugefügt für Wetter (API Key Auswahl)
-import python_multipart
+import multipart
 
 
 class ConversationTracker:
