@@ -154,7 +154,7 @@ def getWeather(city: str, country: str = "DE", forecast: str = "no"): # <-- Defa
 
     try:
         if forecast == "no":
-            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}¤t_weather=true&timezone=Europe/Berlin" # <-- Zeitzone hinzugefügt, current statt hourly
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&timezone=Europe/Berlin" # <-- Zeitzone hinzugefügt, current statt hourly
             response = requests.get(url, timeout=10) # <-- Timeout hinzugefügt
             response.raise_for_status() # <-- Prüft auf HTTP-Fehler
             data = response.json()
