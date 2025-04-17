@@ -11,6 +11,14 @@ from starlette.websockets import WebSocketState  # <-- NEU für korrekte Statusp
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from dotenv import load_dotenv
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests         # <-- Hinzugefügt für Wetter
+import http.client    # <-- Hinzugefügt für Wetter (PositionStack)
+import urllib.parse   # <-- Hinzugefügt für Wetter (PositionStack)
+import random         # <-- Hinzugefügt für Wetter (API Key Auswahl)
+
 
 print(f"Websockets version: {websockets.__version__}")
 
@@ -22,6 +30,14 @@ load_dotenv()
 # Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 PORT = int(os.getenv('PORT', 5050))
+
+# E-Mail Konfiguration
+EMAIL_ENABLED = os.getenv('EMAIL_ENABLED', 'true').lower() == 'true'
+EMAIL_SENDER = os.getenv('EMAIL_SENDER', 'your-email@example.com')
+EMAIL_RECIPIENT = os.getenv('EMAIL_RECIPIENT', 'your-email@example.com')
+EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD', '')
+EMAIL_SMTP_SERVER = os.getenv('EMAIL_SMTP_SERVER', 'smtp.gmail.com')
+EMAIL_SMTP_PORT = int(os.getenv('EMAIL_SMTP_PORT', 587))
 
 SYSTEM_MESSAGE = (
     "Du bist James der KI-Wissensbutler und arbeitest bei der Telefonhotline von C&P Apps bzw. Couture & Pixels. Das ist ein Einzelunternehmen von Michael Knochen und erstellt Web-Apps, Webseiten, KI-Integrationen, Apps wie James KI, Imagenator, djAI und Cinematic AI. Anrufer sprechen deutsch und du sollst auch deutsch sprechen. Wenn du das aktuelle Datum benötigst, verwende das bereitgestellte Tool."
@@ -69,7 +85,7 @@ GET_WEATHER_TOOL = {
             },
             "country": {
                 "type": "string",
-                "description": "Der Ländercode für das Land aus dem das Wetter abgefragt werden soll im zweistelligen Länderformat, z.Bsp. 'DE' für Deutschland oder 'IT' für Italien",
+                "description": "Der Ländercode für das Land aus dem das Wetter abgefragt werden soll im zweistelligen Länderformat, z.Bsp. 'DE' für Deutschland oder 'IT' für Italien. Standard ist 'DE', wenn nicht anders angegeben.", # <-- Standard hinzugefügt
             },
             "forecast": {
                 "type": "string",
@@ -81,15 +97,15 @@ GET_WEATHER_TOOL = {
 }
 
 
-def getPositionForcity(city: str, country):
-    randomInt = random.randint(2, 3)
+def getPositionForcity(city: str, country: str): # <-- Typ-Hint für country hinzugefügt
+    randomInt = random.randint(1, 3)
     if randomInt == 1:
         apiKey = "e0673530c180dc994fba1c54b9462d05"
     elif randomInt == 2:
         apiKey = "be66adb3b8df305b7cd9f36ad0ddbfa1"
     else:
         apiKey = "1e65b7c071d1d33f6c76ae35235c572a"
-    print("getPositionForcity")
+    logger.info(f"getPositionForcity called with city='{city}', country='{country}', using API Key ending in ...{apiKey[-4:]}") # <-- Verbessertes Logging
     print(city + " " + country)
     conn = http.client.HTTPConnection('api.positionstack.com')
     params = urllib.parse.urlencode({
@@ -99,56 +115,92 @@ def getPositionForcity(city: str, country):
         'limit': 1,
     })
 
-    conn.request('GET', '/v1/forward?{}'.format(params))
+    try:
+        conn.request('GET', '/v1/forward?{}'.format(params))
+        res = conn.getresponse()
+        data = res.read()
+        logger.info(f"PositionStack API Response Status: {res.status}, Reason: {res.reason}")
+        dataJson = json.loads(data.decode('utf-8'))
+        logger.debug(f"PositionStack API Response Data: {dataJson}")  # <-- Debug Log für Response
 
-    res = conn.getresponse()
-    data = res.read()
-    dataJson = json.loads(data.decode('utf-8'))
-    return dataJson["data"][0]
+        if "data" in dataJson and dataJson["data"]:
+            logger.info(
+                f"Position found for {city}, {country}: {dataJson['data'][0]['latitude']}, {dataJson['data'][0]['longitude']}")
+            return dataJson["data"][0]
+        else:
+            logger.warning(f"No position data found for {city}, {country} in PositionStack response: {dataJson}")
+            return None  # <-- Rückgabe None, wenn nichts gefunden wurde
+    except Exception as e:
+        logger.error(f"Error calling PositionStack API for {city}, {country}: {e}", exc_info=True)
+        return None  # <-- Rückgabe None bei Fehler
+    finally:
+        conn.close()  # <-- Verbindung schließen
 
-
-def getCurrentWeather(city, country: str = "DE") -> str:
-    print(city + ", " + country)
+def getWeather(city: str, country: str = "DE", forecast: str = "no"): # <-- Default für country hier
+    logger.info(f"getWeather called with city='{city}', country='{country}', forecast='{forecast}'")
     posData = getPositionForcity(city, country)
-    lat = posData["latitude"]
-    lon = posData["longitude"]
-    url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&hourly=temperature_2m&current_weather=true" % (
-    lat, lon)
-    response = requests.get(url)
-    data = json.loads(response.text)
-    print(data)
-    return str(data["current_weather"]["temperature"])
+    if not posData:
+        logger.error(f"Could not get position for city '{city}', country '{country}'. Aborting weather fetch.")
+        return f"Ich konnte die Position für {city} nicht finden, um das Wetter abzurufen."
 
+    lat = posData.get("latitude")
+    lon = posData.get("longitude")
 
-def getForecastWeather(city, country: str = "DE") -> object:
-    posData = getPositionForcity(city, country)
-    lat = posData["latitude"]
-    lon = posData["longitude"]
-    url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current_weather=false&forecast_days=7&daily=temperature_2m_max,temperature_2m_min,rain_sum&timezone=%s" % (
-    lat, lon, "GMT")
-    print(url)
-    response = requests.get(url)
-    data = response.json()
+    if lat is None or lon is None:
+         logger.error(f"Latitude or Longitude missing in position data for {city}: {posData}")
+         return f"Ich konnte die Koordinaten für {city} nicht finden."
 
+    logger.info(f"Fetching weather for coordinates: Lat={lat}, Lon={lon}")
 
-def getWeather(city, country: str = "DE", forecast: str = "no"):
-    print(city + ", " + country)
-    posData = getPositionForcity(city, country)
-    lat = posData["latitude"]
-    lon = posData["longitude"]
-    if forecast == "no":
-        url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&hourly=temperature_2m&current_weather=true" % (
-        lat, lon)
-        response = requests.get(url)
-        data = json.loads(response.text)
-        print(data)
-        return str(data["current_weather"]["temperature"])
-    url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current_weather=false&forecast_days=7&daily=temperature_2m_max,temperature_2m_min,rain_sum&timezone=%s" % (
-    lat, lon, "GMT")
-    print(url)
-    response = requests.get(url)
-    data = response.json()
-    return json.dumps(data)
+    try:
+        if forecast == "no":
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}¤t_weather=true&timezone=Europe/Berlin" # <-- Zeitzone hinzugefügt, current statt hourly
+            response = requests.get(url, timeout=10) # <-- Timeout hinzugefügt
+            response.raise_for_status() # <-- Prüft auf HTTP-Fehler
+            data = response.json()
+            logger.info(f"Open-Meteo Current Weather Response: {data}")
+            if "current_weather" in data and "temperature" in data["current_weather"]:
+                temp = data["current_weather"]["temperature"]
+                return f"Die aktuelle Temperatur in {city} beträgt {temp} Grad Celsius."
+            else:
+                 logger.warning(f"Unexpected response format from Open-Meteo (current): {data}")
+                 return f"Ich konnte die aktuelle Temperatur für {city} nicht abrufen."
+
+        else: # forecast == "yes"
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,temperature_2m_min,rain_sum&forecast_days=7&timezone=Europe/Berlin" # <-- Angepasste URL, Zeitzone
+            response = requests.get(url, timeout=10) # <-- Timeout hinzugefügt
+            response.raise_for_status() # <-- Prüft auf HTTP-Fehler
+            data = response.json()
+            logger.info(f"Open-Meteo Forecast Response: {data}")
+            # Hier könntest du die Vorhersage lesbarer formatieren, statt nur JSON zurückzugeben
+            # Beispiel für eine einfache Formatierung:
+            if "daily" in data and "time" in data["daily"] and "temperature_2m_max" in data["daily"]:
+                forecast_str = f"Wettervorhersage für {city} für die nächsten Tage: "
+                for i, date_str in enumerate(data["daily"]["time"]):
+                     max_temp = data["daily"]["temperature_2m_max"][i]
+                     min_temp = data["daily"]["temperature_2m_min"][i]
+                     rain = data["daily"]["rain_sum"][i]
+                     # Datum lesbarer formatieren (optional)
+                     try:
+                         dt_obj = datetime.datetime.fromisoformat(date_str)
+                         formatted_date = dt_obj.strftime("%A, %d.%m.") # z.B. Donnerstag, 17.04.
+                     except ValueError:
+                         formatted_date = date_str
+                     forecast_str += f"{formatted_date}: Max {max_temp}°C, Min {min_temp}°C, Regen {rain}mm. "
+                return forecast_str.strip()
+            else:
+                 logger.warning(f"Unexpected response format from Open-Meteo (forecast): {data}")
+                 return f"Ich konnte die Wettervorhersage für {city} nicht abrufen."
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error calling Open-Meteo API for {city} (Lat={lat}, Lon={lon}): {e}", exc_info=True)
+        return f"Entschuldigung, es gab ein Problem beim Abrufen der Wetterdaten für {city}."
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON response from Open-Meteo for {city}: {e}", exc_info=True)
+        return f"Entschuldigung, die Wetterdaten für {city} konnten nicht verarbeitet werden."
+    except Exception as e:
+        logger.error(f"Unexpected error in getWeather for {city}: {e}", exc_info=True)
+        return f"Ein unerwarteter Fehler ist beim Abrufen des Wetters für {city} aufgetreten."
 
 
 def get_current_date(*args, **kwargs):
@@ -203,6 +255,8 @@ async def handle_media_stream(websocket: WebSocket):
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1"
     }
+    # NEUER ENDPUNKT (Stand April 2024 - überprüfe ggf. die aktuelle Doku)
+    # openai_ws_url = "wss://api.openai.com/v1/audio/realtime/websocket?model=gpt-4o-mini&encoding=ulaw&sample_rate=8000"
     openai_ws_url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
 
     openai_ws = None  # Definiere außerhalb des try für finally-Block
@@ -238,8 +292,7 @@ async def handle_media_stream(websocket: WebSocket):
                     logger.info("receive_from_twilio: Waiting for initial 'connected' and 'start' messages...")
                     for _ in range(2):  # Erwarte maximal 2 initiale Nachrichten
                         try:
-                            message_text = await asyncio.wait_for(websocket.receive_text(),
-                                                                  timeout=15.0)  # Etwas längerer Timeout
+                            message_text = await asyncio.wait_for(websocket.receive_text(), timeout=15.0)  # Etwas längerer Timeout
                             data = json.loads(message_text)
                             event = data.get('event')
                             logger.info(f"receive_from_twilio: Received initial message: {event}")
@@ -494,8 +547,11 @@ async def handle_media_stream(websocket: WebSocket):
 
                                 if function_name and function_name in AVAILABLE_TOOLS:
                                     try:
+                                        arguments = json.loads(arguments_str)
+                                        logger.info(f"Parsed arguments for {function_name}: {arguments}")
+
                                         tool_function = AVAILABLE_TOOLS[function_name]
-                                        result = tool_function()  # Funktion aufrufen
+                                        result = tool_function(**arguments) # <-- WICHTIG: Argumente übergeben
                                         output_str = str(result)  # Sicherstellen, dass es ein String ist
                                         logger.info(
                                             f"Tool '{function_name}' executed successfully. Result: {output_str}")
@@ -514,7 +570,8 @@ async def handle_media_stream(websocket: WebSocket):
                                         logger.info(f"Sending function_call_output for {call_id} to OpenAI.")
                                         await openai_ws.send(function_output_json)
 
-                                        # Neue Antwort anfordern
+                                        # Neue Antwort anfordern (wichtig, damit die KI das Ergebnis verarbeitet)
+                                        logger.info("Requesting new response from OpenAI after tool execution.")
                                         await openai_ws.send(json.dumps({"type": "response.create"}))
 
                                     except TypeError as e:
