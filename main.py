@@ -29,6 +29,7 @@ class ConversationTracker:
         self.call_end_time = None
         self.caller_number = None
         self.tools_used = []
+        self._processed_items = set()  # Verhindert Duplikate durch ID-Tracking
 
     def start_call(self, caller_number=None):
         """Startet einen neuen Anruf."""
@@ -36,27 +37,56 @@ class ConversationTracker:
         self.caller_number = caller_number or "Unbekannt"
         self.messages = []
         self.tools_used = []
+        self._processed_items = set()
         logger.info(f"Started tracking conversation with caller: {self.caller_number}")
 
-    def add_user_message(self, text):
-        """Fügt eine Benutzer-Nachricht hinzu."""
+    def add_user_message(self, text, item_id=None):
+        """Fügt eine Benutzer-Nachricht hinzu, verhindert Duplikate."""
+        if item_id and item_id in self._processed_items:
+            logger.debug(f"Skipping duplicate user message with item_id: {item_id}")
+            return
+
+        if item_id:
+            self._processed_items.add(item_id)
+
+        # Vermeide leere Nachrichten
+        if not text or not text.strip():
+            return
+
         self.messages.append({"role": "user", "content": text, "timestamp": datetime.datetime.now()})
         logger.info(f"ConversationTracker: Added user message: '{text}' (total messages: {len(self.messages)})")
 
-    def add_assistant_message(self, text):
-        """Fügt eine Assistenten-Nachricht hinzu."""
+    def add_assistant_message(self, text, item_id=None):
+        """Fügt eine Assistenten-Nachricht hinzu, verhindert Duplikate."""
+        if item_id and item_id in self._processed_items:
+            logger.debug(f"Skipping duplicate assistant message with item_id: {item_id}")
+            return
+
+        if item_id:
+            self._processed_items.add(item_id)
+
+        # Vermeide leere Nachrichten
+        if not text or not text.strip():
+            return
+
         self.messages.append({"role": "assistant", "content": text, "timestamp": datetime.datetime.now()})
         logger.info(f"ConversationTracker: Added assistant message: '{text}' (total messages: {len(self.messages)})")
 
-    def add_tool_usage(self, tool_name, result):
+    def add_tool_usage(self, tool_name, result, item_id=None):
         """Protokolliert die Verwendung eines Tools."""
+        if item_id and item_id in self._processed_items:
+            logger.debug(f"Skipping duplicate tool usage with item_id: {item_id}")
+            return
+
+        if item_id:
+            self._processed_items.add(item_id)
+
         self.tools_used.append({"name": tool_name, "result": result, "timestamp": datetime.datetime.now()})
+        logger.info(f"ConversationTracker: Added tool usage: {tool_name} => {result}")
 
     def end_call(self):
         """Beendet den Anruf und gibt eine Zusammenfassung zurück."""
         self.call_end_time = datetime.datetime.now()
-        call_duration = self.call_end_time - self.call_start_time
-
         # Zusammenfassung erstellen
         summary = self._generate_summary()
 
@@ -763,6 +793,62 @@ async def handle_media_stream(websocket: WebSocket):
                             logger.info(f"OpenAI Session Updated. Final config: {response.get('session')}")
 
                         # ---- ASSISTANT-TRANSKRIPTE ERFASSEN ----
+
+                        # Neuer Abschnitt zum Extrahieren von Anrufer-Transkripten
+                        if response_type in ['input_audio_buffer.speech_stopped', 'input_audio_buffer.committed']:
+                            # Versuch, Transkript direkt aus dem Event zu extrahieren
+                            if 'transcript' in response:
+                                transcript = response.get('transcript')
+                                item_id = response.get('item_id')
+                                if transcript:
+                                    logger.info(f"Found user transcript in {response_type}: {transcript}")
+                                    conversation_tracker.add_user_message(transcript, item_id)
+
+                            # Anfordern des Transkripts über die API wenn möglich
+                            if 'item_id' in response and not 'transcript' in response:
+                                item_id = response.get('item_id')
+                                try:
+                                    # Verwenden der retrieve API für Transkript
+                                    retrieve_request = {
+                                        "type": "conversation.item.retrieve",
+                                        "item_id": item_id
+                                    }
+                                    logger.info(f"Requesting transcript for user item: {item_id}")
+                                    await openai_ws.send(json.dumps(retrieve_request))
+                                except Exception as e:
+                                    logger.error(f"Error requesting transcript: {e}")
+
+                        # Verarbeitung der Antwort auf die Retrieve-Anfrage
+                        if response_type == 'conversation.item.retrieved':
+                            try:
+                                item = response.get('item', {})
+                                item_id = item.get('id')
+
+                                # Nur für User-Messages
+                                if item.get('role') == 'user':
+                                    # Verschiedene Formate für Transkripte
+                                    transcript = None
+
+                                    # 1. Direktes Transkript in content
+                                    if 'content' in item:
+                                        content = item.get('content', [])
+                                        if isinstance(content, list) and len(content) > 0:
+                                            for content_item in content:
+                                                if isinstance(content_item, dict) and 'transcript' in content_item:
+                                                    transcript = content_item.get('transcript')
+                                                    if transcript:
+                                                        logger.info(
+                                                            f"Found user transcript in retrieved item content: {transcript}")
+                                                        conversation_tracker.add_user_message(transcript, item_id)
+                                                        break
+
+                                    # 2. Fallback: Audio-Analyse für Transkript
+                                    if not transcript and 'audio' in item:
+                                        # Hier könnten wir theoretisch Whisper oder einen anderen Service nutzen,
+                                        # aber das ist für die Zusammenfassung wahrscheinlich übertrieben
+                                        pass
+                            except Exception as e:
+                                logger.error(f"Error extracting transcript from retrieved item: {e}")
 
                         # Bei response.done Assistant-Nachricht erfassen
                         if response_type == 'response.done':
