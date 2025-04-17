@@ -18,6 +18,7 @@ import requests         # <-- Hinzugefügt für Wetter
 import http.client    # <-- Hinzugefügt für Wetter (PositionStack)
 import urllib.parse   # <-- Hinzugefügt für Wetter (PositionStack)
 import random         # <-- Hinzugefügt für Wetter (API Key Auswahl)
+import python_multipart
 
 
 class ConversationTracker:
@@ -29,7 +30,7 @@ class ConversationTracker:
         self.call_end_time = None
         self.caller_number = None
         self.tools_used = []
-        self._processed_items = set()  # Verhindert Duplikate durch ID-Tracking
+        self._processed_transcripts = set()  # Verhindert Duplikate durch Transkript-Tracking statt ID-Tracking
 
     def start_call(self, caller_number=None):
         """Startet einen neuen Anruf."""
@@ -40,30 +41,15 @@ class ConversationTracker:
         self._processed_items = set()
         logger.info(f"Started tracking conversation with caller: {self.caller_number}")
 
-    def add_user_message(self, text, item_id=None):
-        """Fügt eine Benutzer-Nachricht hinzu, verhindert Duplikate."""
-        if item_id and item_id in self._processed_items:
-            logger.debug(f"Skipping duplicate user message with item_id: {item_id}")
-            return
-
-        if item_id:
-            self._processed_items.add(item_id)
-
-        # Vermeide leere Nachrichten
-        if not text or not text.strip():
-            return
-
-        self.messages.append({"role": "user", "content": text, "timestamp": datetime.datetime.now()})
-        logger.info(f"ConversationTracker: Added user message: '{text}' (total messages: {len(self.messages)})")
-
     def add_assistant_message(self, text, item_id=None):
         """Fügt eine Assistenten-Nachricht hinzu, verhindert Duplikate."""
-        if item_id and item_id in self._processed_items:
-            logger.debug(f"Skipping duplicate assistant message with item_id: {item_id}")
+        # Verhindere Duplikate basierend auf dem Transkript-Text, nicht der ID
+        if text in self._processed_transcripts:
+            logger.debug(f"Skipping duplicate assistant message: '{text[:30]}...'")
             return
 
-        if item_id:
-            self._processed_items.add(item_id)
+        # Speichere den Transkript-Text für Deduplizierung
+        self._processed_transcripts.add(text)
 
         # Vermeide leere Nachrichten
         if not text or not text.strip():
@@ -71,6 +57,21 @@ class ConversationTracker:
 
         self.messages.append({"role": "assistant", "content": text, "timestamp": datetime.datetime.now()})
         logger.info(f"ConversationTracker: Added assistant message: '{text}' (total messages: {len(self.messages)})")
+
+    # Gleiche Logik für Benutzer-Nachrichten
+    def add_user_message(self, text, item_id=None):
+        """Fügt eine Benutzer-Nachricht hinzu, verhindert Duplikate."""
+        if text in self._processed_transcripts:
+            logger.debug(f"Skipping duplicate user message: '{text[:30]}...'")
+            return
+
+        self._processed_transcripts.add(text)
+
+        if not text or not text.strip():
+            return
+
+        self.messages.append({"role": "user", "content": text, "timestamp": datetime.datetime.now()})
+        logger.info(f"ConversationTracker: Added user message: '{text}' (total messages: {len(self.messages)})")
 
     def add_tool_usage(self, tool_name, result, item_id=None):
         """Protokolliert die Verwendung eines Tools."""
@@ -246,7 +247,8 @@ KNOWN_RESPONSE_TYPES = [
     'input_audio_buffer.speech_stopped', 'response.audio.delta', 'response.content.delta',
     'response.content.done', 'response.done', 'rate_limits.updated',
     'response.function_call_arguments.delta', 'response.function_call_arguments.done',
-    'conversation.item.retrieve.response', 'conversation.item.response', 'error'
+    'conversation.item.retrieve.response', 'conversation.item.response', 'error',
+    'conversation.item.input_audio_transcription.completed'  # Neuer Event-Typ
 ]
 app = FastAPI()
 if not OPENAI_API_KEY:
@@ -694,161 +696,18 @@ async def handle_media_stream(websocket: WebSocket):
                             logger.info(f"USER TRANSCRIPT found in {response_type}: {transcript}")
                             conversation_tracker.add_user_message(transcript)
 
-                        # 2. Transkript bei committed buffer
-                        if response_type == 'input_audio_buffer.committed':
+                        # Spezifischer Handler für den neuen Transkriptions-Event-Typ
+                        if response_type == 'conversation.item.input_audio_transcription.completed':
                             try:
-                                transcript = None
-
-                                # Direkt im Event
-                                if 'transcript' in response:
-                                    transcript = response.get('transcript')
-
-                                # In Metadata
-                                elif 'metadata' in response and response.get(
-                                        'metadata') and 'transcript' in response.get('metadata', {}):
-                                    transcript = response.get('metadata', {}).get('transcript')
-
-                                # API-Anfrage für Transkript
-                                elif 'item_id' in response:
-                                    item_id = response.get('item_id')
-                                    transcript_query = {
-                                        "type": "conversation.item.retrieve",
-                                        "item_id": item_id
-                                    }
-                                    logger.info(f"Requesting transcript for user item: {item_id}")
-                                    await openai_ws.send(json.dumps(transcript_query))
-
-                                # Speichern wenn vorhanden
-                                if transcript:
-                                    logger.info(f"Adding user transcript (direct): {transcript}")
-                                    conversation_tracker.add_user_message(transcript)
-
-                            except Exception as e:
-                                logger.error(f"Error processing user input: {e}", exc_info=True)
-
-                        # 3. Transkript aus speech_stopped
-                        if response_type == 'input_audio_buffer.speech_stopped' and 'transcript' in response:
-                            transcript = response.get('transcript')
-                            if transcript:
-                                logger.info(f"Adding user transcript from speech_stopped: {transcript}")
-                                conversation_tracker.add_user_message(transcript)
-
-                        # 4. Transkript aus item.retrieve response
-                        if response_type in ['conversation.item.retrieve.response', 'conversation.item.response']:
-                            try:
-                                item = response.get('item', {})
-                                if item.get('role') == 'user':
-                                    # String content
-                                    if isinstance(item.get('content'), str):
-                                        transcript = item.get('content')
-                                        if transcript:
-                                            logger.info(f"Adding user transcript (string content): {transcript}")
-                                            conversation_tracker.add_user_message(transcript)
-
-                                    # List content
-                                    elif isinstance(item.get('content'), list):
-                                        user_text = ""
-                                        for content in item.get('content', []):
-                                            if isinstance(content, str):
-                                                user_text += content + " "
-                                            elif isinstance(content, dict):
-                                                if content.get('type') in ['text', 'transcription',
-                                                                           'audio'] and content.get('text'):
-                                                    user_text += content.get('text') + " "
-                                                elif 'text' in content:
-                                                    user_text += content.get('text') + " "
-                                                elif 'transcript' in content:
-                                                    user_text += content.get('transcript') + " "
-
-                                        if user_text.strip():
-                                            logger.info(f"Adding user transcript (object content): {user_text.strip()}")
-                                            conversation_tracker.add_user_message(user_text.strip())
-
-                                    # Direct properties
-                                    elif item.get('transcript'):
-                                        transcript = item.get('transcript')
-                                        logger.info(f"Adding user transcript (item transcript): {transcript}")
-                                        conversation_tracker.add_user_message(transcript)
-                                    elif item.get('text'):
-                                        text = item.get('text')
-                                        logger.info(f"Adding user transcript (item text): {text}")
-                                        conversation_tracker.add_user_message(text)
-
-                            except Exception as e:
-                                logger.error(f"Error processing item response: {e}", exc_info=True)
-
-                        # ---- STANDARD EVENT HANDLING ----
-
-                        # Logging und Fehlerbehandlung
-                        if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
-                            logger.info(f"Received from OpenAI: Type={response_type}, Data={response}")
-
-                        # Fehlerbehandlung
-                        if response_type == 'error':
-                            logger.error(f"!!! OpenAI API Error: {response.get('error')}")
-                            continue
-
-                        # Session Update
-                        if response_type == 'session.updated':
-                            logger.info(f"OpenAI Session Updated. Final config: {response.get('session')}")
-
-                        # ---- ASSISTANT-TRANSKRIPTE ERFASSEN ----
-
-                        # Neuer Abschnitt zum Extrahieren von Anrufer-Transkripten
-                        if response_type in ['input_audio_buffer.speech_stopped', 'input_audio_buffer.committed']:
-                            # Versuch, Transkript direkt aus dem Event zu extrahieren
-                            if 'transcript' in response:
+                                # Erfasse das Transkript aus dem Event
+                                item_id = response.get('item_id')
                                 transcript = response.get('transcript')
-                                item_id = response.get('item_id')
+
                                 if transcript:
-                                    logger.info(f"Found user transcript in {response_type}: {transcript}")
-                                    conversation_tracker.add_user_message(transcript, item_id)
-
-                            # Anfordern des Transkripts über die API wenn möglich
-                            if 'item_id' in response and not 'transcript' in response:
-                                item_id = response.get('item_id')
-                                try:
-                                    # Verwenden der retrieve API für Transkript
-                                    retrieve_request = {
-                                        "type": "conversation.item.retrieve",
-                                        "item_id": item_id
-                                    }
-                                    logger.info(f"Requesting transcript for user item: {item_id}")
-                                    await openai_ws.send(json.dumps(retrieve_request))
-                                except Exception as e:
-                                    logger.error(f"Error requesting transcript: {e}")
-
-                        # Verarbeitung der Antwort auf die Retrieve-Anfrage
-                        if response_type == 'conversation.item.retrieved':
-                            try:
-                                item = response.get('item', {})
-                                item_id = item.get('id')
-
-                                # Nur für User-Messages
-                                if item.get('role') == 'user':
-                                    # Verschiedene Formate für Transkripte
-                                    transcript = None
-
-                                    # 1. Direktes Transkript in content
-                                    if 'content' in item:
-                                        content = item.get('content', [])
-                                        if isinstance(content, list) and len(content) > 0:
-                                            for content_item in content:
-                                                if isinstance(content_item, dict) and 'transcript' in content_item:
-                                                    transcript = content_item.get('transcript')
-                                                    if transcript:
-                                                        logger.info(
-                                                            f"Found user transcript in retrieved item content: {transcript}")
-                                                        conversation_tracker.add_user_message(transcript, item_id)
-                                                        break
-
-                                    # 2. Fallback: Audio-Analyse für Transkript
-                                    if not transcript and 'audio' in item:
-                                        # Hier könnten wir theoretisch Whisper oder einen anderen Service nutzen,
-                                        # aber das ist für die Zusammenfassung wahrscheinlich übertrieben
-                                        pass
+                                    logger.info(f"Received user audio transcript for item {item_id}: {transcript}")
+                                    conversation_tracker.add_user_message(transcript)
                             except Exception as e:
-                                logger.error(f"Error extracting transcript from retrieved item: {e}")
+                                logger.error(f"Error processing input audio transcription: {e}", exc_info=True)
 
                         # Bei response.done Assistant-Nachricht erfassen
                         if response_type == 'response.done':
@@ -989,12 +848,12 @@ async def handle_media_stream(websocket: WebSocket):
 
                         if response_type not in KNOWN_RESPONSE_TYPES:
                             logger.info(f"NEW RESPONSE TYPE: {response_type}")
-                            logger.info(f"UNKNOWN RESPONSE DATA: {response}")
+                            #logger.info(f"UNKNOWN RESPONSE DATA: {response}")
 
                             # Versuch, Transkripte zu extrahieren
                             if 'transcript' in response:
                                 transcript = response.get('transcript')
-                                logger.info(f"Found transcript in unknown response: {transcript}")
+                                #logger.info(f"Found transcript in unknown response: {transcript}")
                                 # Nach Rolle zuordnen
                                 if 'role' in response and response.get('role') == 'user':
                                     conversation_tracker.add_user_message(transcript)
@@ -1172,6 +1031,9 @@ async def send_session_update(openai_ws):
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
             "temperature": 0.8,
+            "input_audio_transcription": {
+                "model": "whisper-1"
+            },
             "tools": [GET_CURRENT_DATE_TOOL, GET_WEATHER_TOOL]
         }
     }
