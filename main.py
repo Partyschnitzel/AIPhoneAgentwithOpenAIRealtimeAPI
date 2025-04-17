@@ -20,6 +20,106 @@ import urllib.parse   # <-- Hinzugefügt für Wetter (PositionStack)
 import random         # <-- Hinzugefügt für Wetter (API Key Auswahl)
 
 
+class ConversationTracker:
+    """Verfolgt den Gesprächsverlauf für die Zusammenfassung."""
+
+    def __init__(self):
+        self.messages = []
+        self.call_start_time = None
+        self.call_end_time = None
+        self.caller_number = None
+        self.tools_used = []
+
+    def start_call(self, caller_number=None):
+        """Startet einen neuen Anruf."""
+        self.call_start_time = datetime.datetime.now()
+        self.caller_number = caller_number or "Unbekannt"
+        self.messages = []
+        self.tools_used = []
+        logger.info(f"Started tracking conversation with caller: {self.caller_number}")
+
+    def add_user_message(self, text):
+        """Fügt eine Benutzer-Nachricht hinzu."""
+        self.messages.append({"role": "user", "content": text, "timestamp": datetime.datetime.now()})
+
+    def add_assistant_message(self, text):
+        """Fügt eine Assistenten-Nachricht hinzu."""
+        self.messages.append({"role": "assistant", "content": text, "timestamp": datetime.datetime.now()})
+
+    def add_tool_usage(self, tool_name, result):
+        """Protokolliert die Verwendung eines Tools."""
+        self.tools_used.append({"name": tool_name, "result": result, "timestamp": datetime.datetime.now()})
+
+    def end_call(self):
+        """Beendet den Anruf und gibt eine Zusammenfassung zurück."""
+        self.call_end_time = datetime.datetime.now()
+        call_duration = self.call_end_time - self.call_start_time
+
+        # Zusammenfassung erstellen
+        summary = self._generate_summary()
+
+        # Wenn E-Mail aktiviert ist, sende diese
+        if EMAIL_ENABLED:
+            self._send_email_summary(summary)
+
+        return summary
+
+    def _generate_summary(self):
+        """Erstellt eine formatierte Zusammenfassung des Gesprächs."""
+        if not self.call_start_time:
+            return "Kein Anruf aufgezeichnet."
+
+        call_duration = self.call_end_time - self.call_start_time if self.call_end_time else datetime.datetime.now() - self.call_start_time
+        minutes, seconds = divmod(call_duration.seconds, 60)
+
+        summary = []
+        summary.append("=== James KI-Butler - Anrufzusammenfassung ===")
+        summary.append(f"Datum: {self.call_start_time.strftime('%d.%m.%Y')}")
+        summary.append(f"Uhrzeit: {self.call_start_time.strftime('%H:%M:%S')}")
+        summary.append(f"Anrufer: {self.caller_number}")
+        summary.append(f"Dauer: {minutes} Minuten, {seconds} Sekunden")
+        summary.append("")
+
+        summary.append("--- Gesprächsverlauf ---")
+        for msg in self.messages:
+            role = "Anrufer" if msg["role"] == "user" else "James"
+            timestamp = msg["timestamp"].strftime("%H:%M:%S")
+            summary.append(f"[{timestamp}] {role}: {msg['content']}")
+
+        if self.tools_used:
+            summary.append("")
+            summary.append("--- Verwendete Tools ---")
+            for tool in self.tools_used:
+                timestamp = tool["timestamp"].strftime("%H:%M:%S")
+                summary.append(f"[{timestamp}] {tool['name']}: {tool['result']}")
+
+        summary.append("")
+        summary.append("=== Ende der Zusammenfassung ===")
+
+        return "\n".join(summary)
+
+    def _send_email_summary(self, summary):
+        """Sendet die Zusammenfassung per E-Mail."""
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = EMAIL_SENDER
+            msg['To'] = EMAIL_RECIPIENT
+            msg[
+                'Subject'] = f"James KI-Butler: Anrufzusammenfassung vom {self.call_start_time.strftime('%d.%m.%Y, %H:%M')}"
+
+            msg.attach(MIMEText(summary, 'plain'))
+
+            server = smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+
+            logger.info(f"E-Mail-Zusammenfassung erfolgreich gesendet an {EMAIL_RECIPIENT}")
+        except Exception as e:
+            logger.error(f"Fehler beim Senden der E-Mail: {e}", exc_info=True)
+
+
 print(f"Websockets version: {websockets.__version__}")
 
 # Configure logging
@@ -96,6 +196,8 @@ GET_WEATHER_TOOL = {
     }
 }
 
+conversation_tracker = ConversationTracker()
+
 
 def getPositionForcity(city: str, country: str): # <-- Typ-Hint für country hinzugefügt
     randomInt = random.randint(1, 3)
@@ -154,7 +256,7 @@ def getWeather(city: str, country: str = "DE", forecast: str = "no"): # <-- Defa
 
     try:
         if forecast == "no":
-            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&timezone=Europe/Berlin" # <-- Zeitzone hinzugefügt, current statt hourly
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m&current_weather=true" # <-- Zeitzone hinzugefügt, current statt hourly
             response = requests.get(url, timeout=10) # <-- Timeout hinzugefügt
             response.raise_for_status() # <-- Prüft auf HTTP-Fehler
             data = response.json()
@@ -207,7 +309,7 @@ def get_current_date(*args, **kwargs):
     """Gibt das aktuelle Datum als formatierten String zurück.
     Ignoriert alle übergebenen Parameter."""
     now = datetime.datetime.now()
-    date_str = now.strftime("%d. %B %Y")  # Format z.B. "16. April 2025"
+    date_str = now.strftime("%d. %B %Y") # Format z.B. "16. April 2025"
     return date_str
 
 
@@ -227,7 +329,18 @@ async def index_page():
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def handle_incoming_call(request: Request):
     """Handle incoming call and return TwiML response to connect to Media Stream."""
-    logger.info("Received incoming call request from: %s", request.client.host)
+    try:
+        form_data = await request.form()
+        caller = form_data.get("From", "Unbekannte Nummer")
+        logger.info(f"Received incoming call from: {caller}")
+
+        # Starte den Conversation Tracker mit der Anrufernummer
+        conversation_tracker.start_call(caller)
+    except Exception as e:
+        logger.error(f"Error getting caller information: {e}")
+        logger.info("Received incoming call from unknown caller")
+        conversation_tracker.start_call()
+
     response = VoiceResponse()
     host = request.url.hostname
     # Verwende Hostname aus Request für korrekte WS-URL hinter Proxies/Load Balancern
@@ -371,8 +484,11 @@ async def handle_media_stream(websocket: WebSocket):
                                 except IndexError:
                                     logger.warning("Mark queue was empty when trying to pop.")
                         elif event == 'stop':
-                            logger.info("Twilio call stopped event received in main loop.")
-                            return  # Beende die Task
+                            logger.info("Twilio call stopped event received in loop.")
+                            # Anruf beenden und E-Mail senden
+                            summary = conversation_tracker.end_call()
+                            logger.info(f"Call ended. Summary:\n{summary}")
+                            return  # Stop this task
                         else:
                             logger.debug(f"Unhandled Twilio event in main loop: {event}")
 
@@ -511,6 +627,10 @@ async def handle_media_stream(websocket: WebSocket):
                             else:
                                 logger.warning(
                                     f"Cannot send audio delta. [Debug Detail] is_sid_set={is_sid_set}, is_ws_connected={is_ws_connected}, stream_sid='{stream_sid}', state='{websocket.client_state}'")
+                            if response.get('transcript'):
+                                transcript = response.get('transcript')
+                                if transcript and response.get('role') == 'assistant':
+                                    conversation_tracker.add_assistant_message(transcript)
 
                         # Unterbrechung durch Benutzer
                         if response_type == 'input_audio_buffer.speech_started':
@@ -518,6 +638,9 @@ async def handle_media_stream(websocket: WebSocket):
                             if last_assistant_item:
                                 logger.info(f"Interrupting response with id: {last_assistant_item}")
                                 await handle_speech_started_event()
+                            if response.get('transcript'):
+                                transcript = response.get('transcript')
+                                conversation_tracker.add_user_message(transcript)
 
                         # Tool Calling - Argumente sammeln
                         if response_type == 'response.function_call_arguments.delta':
@@ -592,6 +715,10 @@ async def handle_media_stream(websocket: WebSocket):
                 except Exception as e:
                     logger.error(f"Error in send_to_twilio: {e}", exc_info=True)
                 finally:
+                    # Am Ende sicherstellen, dass der Anruf als beendet markiert wird
+                    if conversation_tracker.call_start_time and not conversation_tracker.call_end_time:
+                        summary = conversation_tracker.end_call()
+                        logger.info(f"Call force-ended in finally block. Summary:\n{summary}")
                     logger.info("send_to_twilio task finished.")
                     # Schließe Twilio WS NICHT hier, wird von außen gehandhabt
 
