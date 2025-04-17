@@ -325,61 +325,32 @@ async def handle_media_stream(websocket: WebSocket):
                                 if function_name and function_name in AVAILABLE_TOOLS:
                                     try:
                                         tool_function = AVAILABLE_TOOLS[function_name]
-                                        result = tool_function() # Funktion aufrufen
-                                        output_str = str(result) # Sicherstellen, dass es ein String ist
-                                        # Verbesserte Debug-Ausgaben hinzufügen
-                                        logger.info(f"DEBUG: call_id type: {type(call_id)}, value: {call_id}")
-                                        logger.info(f"DEBUG: output_str type: {type(output_str)}, value: {output_str}")
-                                        
-                                        # Explizit alle Teile des Objekts typisieren
-                                        function_output_item = {
-                                            "type": str("conversation.item.create"), 
+                                        result = tool_function()  # Funktion aufrufen
+                                        output_str = str(result)  # Sicherstellen, dass es ein String ist
+                                        logger.info(f"Tool '{function_name}' executed successfully. Result: {output_str}")
+                                    
+                                        # Erzeuge die Antwort direkt als JSON-String
+                                        function_output_json = json.dumps({
+                                            "type": "conversation.item.create",
                                             "item": {
-                                                "type": str("function_call_output"),
-                                                "call_id": str(call_id),  # Explizit zu String konvertieren
-                                                "output": str(output_str)  # Nochmals sicherstellen, dass es ein String ist
+                                                "type": "function_call_output",
+                                                "call_id": call_id,
+                                                "output": output_str
                                             }
-                                        }
+                                        })
                                         
-                                        # Debugging der gesamten Struktur
-                                        logger.info(f"DEBUG: function_output_item complete structure: {function_output_item}")
-                                        logger.info(f"DEBUG: item type: {type(function_output_item['item'])}")
-                                        
-                                        try:
-                                            # Versuche die JSON-Serialisierung vor dem Senden
-                                            json_data = json.dumps(function_output_item)
-                                            logger.info(f"DEBUG: JSON serialization successful")
-                                            
-                                            # Sende erst nach erfolgreicher Serialisierung
-                                            await openai_ws.send(json_data)
-                                            logger.info(f"Function output sent successfully.")
-                                            
-                                            # Nach erfolgreichem Senden des Ergebnisses
-                                            response_create_item = {"type": "response.create"}
-                                            await openai_ws.send(json.dumps(response_create_item))
-                                            
-                                        except TypeError as e:
-                                            logger.error(f"JSON serialization error: {e}", exc_info=True)
-                                            # Detaillierte Typinformationen
-                                            logger.error(f"Detailed type info - function_output_item: {type(function_output_item)}")
-                                            for key, value in function_output_item.items():
-                                                logger.error(f"Key: {key}, Value Type: {type(value)}, Value: {value}")
-                                            
-                                            if 'item' in function_output_item:
-                                                logger.error(f"Item Content Types:")
-                                                for k, v in function_output_item['item'].items():
-                                                    logger.error(f"  Item Key: {k}, Value Type: {type(v)}, Value: {v}")
-                                        # Erneut versuchen zu senden, Fehler wird jetzt besser behandelt
-                                        await openai_ws.send(json.dumps(function_output_item))
-
+                                        # Sende den bereits serialisierten JSON-String
+                                        logger.info(f"Sending function_call_output for {call_id} to OpenAI.")
+                                        await openai_ws.send(function_output_json)
+                                    
                                         # Neue Antwort anfordern
-                                        response_create_item = {"type": "response.create"}
-                                        logger.info(f"Sending response.create after tool call {call_id}.")
-                                        await openai_ws.send(json.dumps(response_create_item))
+                                        await openai_ws.send(json.dumps({"type": "response.create"}))                                    
 
-                                    except TypeError as e: # Spezifisch für JSON-Fehler
-                                        logger.error(f"!!! JSON Serialization Error sending function_call_output for tool '{function_name}': {e}", exc_info=True)
-                                        logger.error(f"Problematic function_output_item: {function_output_item}")
+                                    except TypeError as e:
+                                        logger.error(f"!!! JSON Serialization Error: {e}", exc_info=True)
+                                        # Logge die Werte für Debugging
+                                        logger.error(f"call_id type: {type(call_id)}, value: {repr(call_id)}")
+                                        logger.error(f"output_str type: {type(output_str)}, value: {repr(output_str)}")
                                     except Exception as e:
                                         logger.error(f"Error executing/sending tool '{function_name}': {e}", exc_info=True)
                                 else:
