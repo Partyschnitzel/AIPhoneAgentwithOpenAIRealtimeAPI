@@ -56,10 +56,12 @@ GET_CURRENT_DATE_TOOL = {
     }
 }
 
-def get_current_date():
-    """Gibt das aktuelle Datum als formatierten String zurück."""
+def get_current_date(*args, **kwargs):
+    """Gibt das aktuelle Datum als formatierten String zurück.
+    Ignoriert alle übergebenen Parameter."""
     now = datetime.datetime.now()
-    return now.strftime("%d. %B %Y") # Format z.B. "16. April 2025"
+    date_str = now.strftime("%d. %B %Y") # Format z.B. "16. April 2025"
+    return date_str
 
 AVAILABLE_TOOLS = {
     "get_current_date": get_current_date
