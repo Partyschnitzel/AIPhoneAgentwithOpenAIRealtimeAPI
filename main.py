@@ -75,8 +75,8 @@ GET_WEATHER_TOOL = {
                 "type": "string",
                 "description": "'no' = aktuelle Temperatur, 'yes' = Vorhersage für 7 Tage. Muss 'no' oder 'yes' sein.",
             }
-            "required": ["city", "forecast"]  # Keine Parameter nötig
-        }
+        },
+        "required": ["city", "forecast"],
     }
 }
 
