@@ -780,7 +780,9 @@ async def handle_media_stream(websocket: WebSocket):
                                             else:
                                                 conversation_tracker.add_assistant_message(transcript)
 
-                        
+                        except Exception as e:
+                            logger.error(f"Error processing item response: {e}", exc_info=True)
+
                         # Logging und Fehlerbehandlung
                         if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
                             logger.info(f"Received from OpenAI: Type={response_type}, Data={response}")
