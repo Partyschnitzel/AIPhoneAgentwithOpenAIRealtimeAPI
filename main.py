@@ -41,10 +41,12 @@ class ConversationTracker:
     def add_user_message(self, text):
         """Fügt eine Benutzer-Nachricht hinzu."""
         self.messages.append({"role": "user", "content": text, "timestamp": datetime.datetime.now()})
+        logger.info(f"ConversationTracker: Added user message: '{text}' (total messages: {len(self.messages)})")
 
     def add_assistant_message(self, text):
         """Fügt eine Assistenten-Nachricht hinzu."""
         self.messages.append({"role": "assistant", "content": text, "timestamp": datetime.datetime.now()})
+        logger.info(f"ConversationTracker: Added assistant message: '{text}' (total messages: {len(self.messages)})")
 
     def add_tool_usage(self, tool_name, result):
         """Protokolliert die Verwendung eines Tools."""
@@ -80,11 +82,15 @@ class ConversationTracker:
         summary.append(f"Dauer: {minutes} Minuten, {seconds} Sekunden")
         summary.append("")
 
-        summary.append("--- Gesprächsverlauf ---")
-        for msg in self.messages:
-            role = "Anrufer" if msg["role"] == "user" else "James"
-            timestamp = msg["timestamp"].strftime("%H:%M:%S")
-            summary.append(f"[{timestamp}] {role}: {msg['content']}")
+        if self.messages:
+            summary.append("--- Gesprächsverlauf ---")
+            for msg in self.messages:
+                role = "Anrufer" if msg["role"] == "user" else "James"
+                timestamp = msg["timestamp"].strftime("%H:%M:%S")
+                summary.append(f"[{timestamp}] {role}: {msg['content']}")
+        else:
+            summary.append("--- Gesprächsverlauf ---")
+            summary.append("Keine Nachrichten erfasst")
 
         if self.tools_used:
             summary.append("")
@@ -376,16 +382,21 @@ async def index_page():
 async def handle_incoming_call(request: Request):
     """Handle incoming call and return TwiML response to connect to Media Stream."""
     try:
-        form_data = await request.form()
-        caller = form_data.get("From", "Unbekannte Nummer")
-        logger.info(f"Received incoming call from: {caller}")
+        # Für POST-Anfragen
+        if request.method == "POST":
+            form_data = await request.form()
+            caller = form_data.get("From", "Unbekannt")
+        # Für GET-Anfragen
+        else:
+            params = request.query_params
+            caller = params.get("From", "Unbekannt")
 
-        # Starte den Conversation Tracker mit der Anrufernummer
+        logger.info(f"Received incoming call from: {caller}")
         conversation_tracker.start_call(caller)
     except Exception as e:
         logger.error(f"Error getting caller information: {e}")
-        logger.info("Received incoming call from unknown caller")
-        conversation_tracker.start_call()
+        logger.info("Starting call with unknown caller")
+        conversation_tracker.start_call("Unbekannt")
 
     response = VoiceResponse()
     host = request.url.hostname
@@ -634,6 +645,54 @@ async def handle_media_stream(websocket: WebSocket):
                             continue
 
                         response_type = response.get('type')
+
+                        # Transkripterfassung für Assistenten-Antworten
+                        if response_type == 'response.done':
+                            try:
+                                output_items = response.get('response', {}).get('output', [])
+                                for item in output_items:
+                                    # Nur Nachrichten-Items verarbeiten
+                                    if item.get('type') == 'message' and item.get('role') == 'assistant':
+                                        content_list = item.get('content', [])
+                                        for content in content_list:
+                                            if content.get('type') == 'audio' and 'transcript' in content:
+                                                transcript = content.get('transcript')
+                                                logger.info(f"Adding assistant transcript: {transcript}")
+                                                conversation_tracker.add_assistant_message(transcript)
+                            except Exception as transcript_error:
+                                logger.error(f"Error processing assistant transcript: {transcript_error}")
+
+                        # Transkripterfassung für Benutzer-Eingaben
+                        if response_type == 'input_audio_buffer.committed':
+                            try:
+                                # Versuche, das Transkript aus dem Item zu extrahieren
+                                item_id = response.get('item_id')
+                                if item_id:
+                                    # Neuen API-Aufruf hinzufügen, um das Transkript direkt aus OpenAI zu erhalten
+                                    transcript_query = {
+                                        "type": "conversation.item.get",
+                                        "item_id": item_id
+                                    }
+                                    # Sende die Anfrage
+                                    await openai_ws.send(json.dumps(transcript_query))
+                            except Exception as e:
+                                logger.error(f"Error requesting user transcript: {e}")
+
+                        # Verarbeitung der Transkript-Antwort
+                        if response_type == 'conversation.item.get.response':
+                            try:
+                                item = response.get('item', {})
+                                if item.get('role') == 'user' and item.get('content'):
+                                    user_text = ""
+                                    for content in item.get('content', []):
+                                        if content.get('type') in ['text', 'transcription'] and content.get('text'):
+                                            user_text += content.get('text') + " "
+
+                                    if user_text.strip():
+                                        logger.info(f"Adding user transcript: {user_text.strip()}")
+                                        conversation_tracker.add_user_message(user_text.strip())
+                            except Exception as e:
+                                logger.error(f"Error processing user transcript response: {e}")
 
                         # Logging und Fehlerbehandlung
                         if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
