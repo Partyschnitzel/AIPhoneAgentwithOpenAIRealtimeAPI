@@ -160,7 +160,8 @@ def get_current_date(*args, **kwargs):
 
 
 AVAILABLE_TOOLS = {
-    "get_current_date": get_current_date
+    "get_current_date": get_current_date,
+    "getWeather": getWeather
 }
 
 
