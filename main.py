@@ -662,24 +662,25 @@ async def handle_media_stream(websocket: WebSocket):
                             except Exception as transcript_error:
                                 logger.error(f"Error processing assistant transcript: {transcript_error}")
 
-                        # Transkripterfassung für Benutzer-Eingaben
+                        # Transkripterfassung für Benutzer-Eingaben  
                         if response_type == 'input_audio_buffer.committed':
                             try:
                                 # Versuche, das Transkript aus dem Item zu extrahieren
                                 item_id = response.get('item_id')
                                 if item_id:
-                                    # Neuen API-Aufruf hinzufügen, um das Transkript direkt aus OpenAI zu erhalten
+                                    # Korrekten API-Aufruf verwenden: conversation.item.retrieve statt conversation.item.get
                                     transcript_query = {
-                                        "type": "conversation.item.get",
+                                        "type": "conversation.item.retrieve",  # Korrigierter API-Typ
                                         "item_id": item_id
                                     }
+                                    logger.info(f"Requesting transcript for user item: {item_id}")
                                     # Sende die Anfrage
                                     await openai_ws.send(json.dumps(transcript_query))
                             except Exception as e:
                                 logger.error(f"Error requesting user transcript: {e}")
 
                         # Verarbeitung der Transkript-Antwort
-                        if response_type == 'conversation.item.get.response':
+                        if response_type == 'conversation.item.retrieve.response':  # Entsprechend angepasst
                             try:
                                 item = response.get('item', {})
                                 if item.get('role') == 'user' and item.get('content'):
@@ -693,7 +694,7 @@ async def handle_media_stream(websocket: WebSocket):
                                         conversation_tracker.add_user_message(user_text.strip())
                             except Exception as e:
                                 logger.error(f"Error processing user transcript response: {e}")
-
+                                
                         # Logging und Fehlerbehandlung
                         if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
                             logger.info(f"Received from OpenAI: Type={response_type}, Data={response}")
