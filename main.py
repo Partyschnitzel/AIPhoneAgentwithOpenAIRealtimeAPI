@@ -649,159 +649,145 @@ async def handle_media_stream(websocket: WebSocket):
                     async for openai_message in openai_ws:
                         try:
                             response = json.loads(openai_message)
-                            response_type = response.get('type')
+                        except json.JSONDecodeError as e:
+                            logger.error(f"JSON decode error from OpenAI: {e} - Message: {openai_message}",
+                                         exc_info=True)
+                            continue
 
-                            # Umfassender Logging-Handler für Transkripte
+                        response_type = response.get('type')
+
+                        # ---- BENUTZER-TRANSKRIPTE ERFASSEN ----
+
+                        # 1. Direktes Transkript im Response
+                        if 'transcript' in response and 'role' in response and response.get('role') == 'user':
+                            transcript = response.get('transcript')
+                            logger.info(f"USER TRANSCRIPT found in {response_type}: {transcript}")
+                            conversation_tracker.add_user_message(transcript)
+
+                        # 2. Transkript bei committed buffer
+                        if response_type == 'input_audio_buffer.committed':
                             try:
-                                # Benutzer-Transkripte
-                                if 'transcript' in response and 'role' in response and response.get('role') == 'user':
+                                transcript = None
+
+                                # Direkt im Event
+                                if 'transcript' in response:
                                     transcript = response.get('transcript')
-                                    logger.info(f"USER TRANSCRIPT found in {response_type}: {transcript}")
+
+                                # In Metadata
+                                elif 'metadata' in response and response.get(
+                                        'metadata') and 'transcript' in response.get('metadata', {}):
+                                    transcript = response.get('metadata', {}).get('transcript')
+
+                                # API-Anfrage für Transkript
+                                elif 'item_id' in response:
+                                    item_id = response.get('item_id')
+                                    transcript_query = {
+                                        "type": "conversation.item.retrieve",
+                                        "item_id": item_id
+                                    }
+                                    logger.info(f"Requesting transcript for user item: {item_id}")
+                                    await openai_ws.send(json.dumps(transcript_query))
+
+                                # Speichern wenn vorhanden
+                                if transcript:
+                                    logger.info(f"Adding user transcript (direct): {transcript}")
                                     conversation_tracker.add_user_message(transcript)
 
-                                    # Transkripterfassung für Benutzer-Eingaben
-                                    if response_type == 'input_audio_buffer.committed':
-                                        try:
-                                            transcript = None
+                            except Exception as e:
+                                logger.error(f"Error processing user input: {e}", exc_info=True)
 
-                                            # Methode 1: Versuche transcript direkt aus dem Event zu extrahieren
-                                            if 'transcript' in response:
-                                                transcript = response.get('transcript')
+                        # 3. Transkript aus speech_stopped
+                        if response_type == 'input_audio_buffer.speech_stopped' and 'transcript' in response:
+                            transcript = response.get('transcript')
+                            if transcript:
+                                logger.info(f"Adding user transcript from speech_stopped: {transcript}")
+                                conversation_tracker.add_user_message(transcript)
 
-                                            # Methode 2: Manchmal ist das Transkript in metadata
-                                            elif 'metadata' in response and response.get(
-                                                    'metadata') and 'transcript' in response.get('metadata', {}):
-                                                transcript = response.get('metadata', {}).get('transcript')
-
-                                            # Methode 3: Versuche bei bestimmten Events transkripte aus der API abzurufen
-                                            elif 'item_id' in response:
-                                                item_id = response.get('item_id')
-                                                # Verwende die korrekte API
-                                                transcript_query = {
-                                                    "type": "conversation.item.retrieve",
-                                                    "item_id": item_id
-                                                }
-                                                logger.info(f"Requesting transcript for user item: {item_id}")
-                                                await openai_ws.send(json.dumps(transcript_query))
-                                                # Hinweis: Die Antwort wird im Handler für conversation.item.retrieve.response verarbeitet
-
-                                            # Wenn wir direkt ein Transkript haben, speichere es
-                                            if transcript:
-                                                logger.info(f"Adding user transcript (direct): {transcript}")
-                                                conversation_tracker.add_user_message(transcript)
-
-                                        except Exception as e:
-                                            logger.error(f"Error processing user input: {e}", exc_info=True)
-
-                                    # Verarbeitung der Transkript-Antwort
-                                    if response_type == 'conversation.item.retrieve.response':  # Entsprechend angepasst
-                                        try:
-                                            item = response.get('item', {})
-                                            if item.get('role') == 'user' and item.get('content'):
-                                                user_text = ""
-                                                for content in item.get('content', []):
-                                                    if content.get('type') in ['text', 'transcription'] and content.get(
-                                                            'text'):
-                                                        user_text += content.get('text') + " "
-
-                                                if user_text.strip():
-                                                    logger.info(f"Adding user transcript: {user_text.strip()}")
-                                                    conversation_tracker.add_user_message(user_text.strip())
-                                        except Exception as e:
-                                            logger.error(f"Error processing user transcript response: {e}")
-
-                                    # Verarbeite verschiedene Antworttypen für Transkripte
-                                    # Für input_audio_buffer.speech_stopped mit Transkript
-                                    if response_type == 'input_audio_buffer.speech_stopped' and 'transcript' in response:
-                                        transcript = response.get('transcript')
+                        # 4. Transkript aus item.retrieve response
+                        if response_type in ['conversation.item.retrieve.response', 'conversation.item.response']:
+                            try:
+                                item = response.get('item', {})
+                                if item.get('role') == 'user':
+                                    # String content
+                                    if isinstance(item.get('content'), str):
+                                        transcript = item.get('content')
                                         if transcript:
-                                            logger.info(f"Adding user transcript from speech_stopped: {transcript}")
+                                            logger.info(f"Adding user transcript (string content): {transcript}")
                                             conversation_tracker.add_user_message(transcript)
 
-                                    # Für Antworten auf conversation.item.retrieve
-                                    if response_type in ['conversation.item.retrieve.response',
-                                                         'conversation.item.response']:
-                                        try:
-                                            item = response.get('item', {})
-                                            if item.get('role') == 'user':
-                                                # Methode 1: direkt in content als Text
-                                                if isinstance(item.get('content'), str):
-                                                    transcript = item.get('content')
-                                                    if transcript:
-                                                        logger.info(
-                                                            f"Adding user transcript (string content): {transcript}")
-                                                        conversation_tracker.add_user_message(transcript)
+                                    # List content
+                                    elif isinstance(item.get('content'), list):
+                                        user_text = ""
+                                        for content in item.get('content', []):
+                                            if isinstance(content, str):
+                                                user_text += content + " "
+                                            elif isinstance(content, dict):
+                                                if content.get('type') in ['text', 'transcription',
+                                                                           'audio'] and content.get('text'):
+                                                    user_text += content.get('text') + " "
+                                                elif 'text' in content:
+                                                    user_text += content.get('text') + " "
+                                                elif 'transcript' in content:
+                                                    user_text += content.get('transcript') + " "
 
-                                                # Methode 2: In content als Liste von Objekten
-                                                elif isinstance(item.get('content'), list):
-                                                    user_text = ""
-                                                    for content in item.get('content', []):
-                                                        # Verschiedene mögliche Strukturen für Text
-                                                        if isinstance(content, str):
-                                                            user_text += content + " "
-                                                        elif isinstance(content, dict):
-                                                            if content.get('type') in ['text', 'transcription',
-                                                                                       'audio'] and content.get('text'):
-                                                                user_text += content.get('text') + " "
-                                                            elif 'text' in content:
-                                                                user_text += content.get('text') + " "
-                                                            elif 'transcript' in content:
-                                                                user_text += content.get('transcript') + " "
+                                        if user_text.strip():
+                                            logger.info(f"Adding user transcript (object content): {user_text.strip()}")
+                                            conversation_tracker.add_user_message(user_text.strip())
 
-                                                    if user_text.strip():
-                                                        logger.info(
-                                                            f"Adding user transcript (object content): {user_text.strip()}")
-                                                        conversation_tracker.add_user_message(user_text.strip())
+                                    # Direct properties
+                                    elif item.get('transcript'):
+                                        transcript = item.get('transcript')
+                                        logger.info(f"Adding user transcript (item transcript): {transcript}")
+                                        conversation_tracker.add_user_message(transcript)
+                                    elif item.get('text'):
+                                        text = item.get('text')
+                                        logger.info(f"Adding user transcript (item text): {text}")
+                                        conversation_tracker.add_user_message(text)
 
-                                                # Methode 3: In transcript oder text direkt im Item
-                                                elif item.get('transcript'):
-                                                    transcript = item.get('transcript')
-                                                    logger.info(
-                                                        f"Adding user transcript (item transcript): {transcript}")
-                                                    conversation_tracker.add_user_message(transcript)
-                                                elif item.get('text'):
-                                                    text = item.get('text')
-                                                    logger.info(f"Adding user transcript (item text): {text}")
-                                                    conversation_tracker.add_user_message(text)
+                            except Exception as e:
+                                logger.error(f"Error processing item response: {e}", exc_info=True)
 
-                                        except Exception as e:
-                                            logger.error(f"Error processing item response: {e}", exc_info=True)
-
-                                    if response_type not in KNOWN_RESPONSE_TYPES:
-                                        logger.info(f"NEW RESPONSE TYPE: {response_type}")
-                                        logger.info(f"UNKNOWN RESPONSE DATA: {response}")
-                                        # Versuch, relevante Transkripte zu extrahieren
-                                        if 'transcript' in response:
-                                            transcript = response.get('transcript')
-                                            logger.info(f"Found transcript in unknown response: {transcript}")
-                                            # Je nach Kontext Benutzer oder Assistent
-                                            if 'role' in response and response.get('role') == 'user':
-                                                conversation_tracker.add_user_message(transcript)
-                                            else:
-                                                conversation_tracker.add_assistant_message(transcript)
-
-                        except:
-                            logger.error("Error.")
+                        # ---- STANDARD EVENT HANDLING ----
 
                         # Logging und Fehlerbehandlung
                         if response_type in LOG_EVENT_TYPES or response_type.startswith("response.function_call"):
                             logger.info(f"Received from OpenAI: Type={response_type}, Data={response}")
+
+                        # Fehlerbehandlung
                         if response_type == 'error':
                             logger.error(f"!!! OpenAI API Error: {response.get('error')}")
                             continue
+
+                        # Session Update
                         if response_type == 'session.updated':
                             logger.info(f"OpenAI Session Updated. Final config: {response.get('session')}")
-                            # Optional: Prüfung der Konfiguration
+
+                        # ---- ASSISTANT-TRANSKRIPTE ERFASSEN ----
+
+                        # Bei response.done Assistant-Nachricht erfassen
+                        if response_type == 'response.done':
+                            try:
+                                output_items = response.get('response', {}).get('output', [])
+                                for item in output_items:
+                                    if item.get('type') == 'message' and item.get('role') == 'assistant':
+                                        content_list = item.get('content', [])
+                                        for content in content_list:
+                                            if content.get('type') == 'audio' and 'transcript' in content:
+                                                transcript = content.get('transcript')
+                                                logger.info(f"Adding assistant transcript: {transcript}")
+                                                conversation_tracker.add_assistant_message(transcript)
+                            except Exception as transcript_error:
+                                logger.error(f"Error processing assistant transcript: {transcript_error}")
+
+                        # ---- AUDIO STREAMING ----
 
                         # Audio an Twilio senden
                         if response_type == 'response.audio.delta' and 'delta' in response:
                             is_sid_set = bool(stream_sid)  # Sollte jetzt immer True sein
-                            # Verwende korrekten State für FastAPI/Starlette
                             is_ws_connected = websocket.client_state == WebSocketState.CONNECTED
 
-                            # Debug Log beibehalten
                             logger.debug(
-                                f"Audio Delta Check: stream_sid set? {is_sid_set} (value='{stream_sid}'), websocket connected? {is_ws_connected} (state='{websocket.client_state}')")
+                                f"Audio Delta Check: stream_sid set? {is_sid_set}, websocket connected? {is_ws_connected}")
 
                             if is_sid_set and is_ws_connected:
                                 audio_payload = response['delta']
@@ -820,11 +806,15 @@ async def handle_media_stream(websocket: WebSocket):
                                 await send_mark(websocket, stream_sid)
                             else:
                                 logger.warning(
-                                    f"Cannot send audio delta. [Debug Detail] is_sid_set={is_sid_set}, is_ws_connected={is_ws_connected}, stream_sid='{stream_sid}', state='{websocket.client_state}'")
+                                    f"Cannot send audio delta. stream_sid={stream_sid}, state={websocket.client_state}")
+
+                            # Audio-Transkript erfassen wenn vorhanden
                             if response.get('transcript'):
                                 transcript = response.get('transcript')
-                                if transcript and response.get('role') == 'assistant':
+                                if transcript:
                                     conversation_tracker.add_assistant_message(transcript)
+
+                        # ---- UNTERBRECHUNG DURCH BENUTZER ----
 
                         # Unterbrechung durch Benutzer
                         if response_type == 'input_audio_buffer.speech_started':
@@ -832,9 +822,8 @@ async def handle_media_stream(websocket: WebSocket):
                             if last_assistant_item:
                                 logger.info(f"Interrupting response with id: {last_assistant_item}")
                                 await handle_speech_started_event()
-                            if response.get('transcript'):
-                                transcript = response.get('transcript')
-                                conversation_tracker.add_user_message(transcript)
+
+                        # ---- TOOL CALLING ----
 
                         # Tool Calling - Argumente sammeln
                         if response_type == 'response.function_call_arguments.delta':
@@ -842,18 +831,17 @@ async def handle_media_stream(websocket: WebSocket):
                             delta = response.get('delta')
                             if call_id and delta is not None:
                                 if call_id not in current_function_calls:
-                                    current_function_calls[call_id] = {"name": None,
-                                                                       "arguments": ""}  # Name noch nicht speichern
+                                    current_function_calls[call_id] = {"name": None, "arguments": ""}
                                     logger.info(f"Receiving arguments for function call {call_id}...")
                                 current_function_calls[call_id]["arguments"] += delta
 
                         # Tool Calling - Ausführung
                         elif response_type == 'response.function_call_arguments.done':
                             call_id = response.get('call_id')
-                            function_name_from_event = response.get('name')  # Namen hier holen
+                            function_name_from_event = response.get('name')
 
                             if call_id in current_function_calls:
-                                current_function_calls[call_id]["name"] = function_name_from_event  # Namen speichern
+                                current_function_calls[call_id]["name"] = function_name_from_event
                                 logger.info(
                                     f"Finished receiving arguments for function call {call_id}, Name: '{function_name_from_event}'")
 
@@ -864,57 +852,79 @@ async def handle_media_stream(websocket: WebSocket):
 
                                 if function_name and function_name in AVAILABLE_TOOLS:
                                     try:
-                                        arguments = json.loads(arguments_str)
-                                        logger.info(f"Parsed arguments for {function_name}: {arguments}")
-
+                                        # Tool ausführen
                                         tool_function = AVAILABLE_TOOLS[function_name]
-                                        result = tool_function(**arguments) # <-- WICHTIG: Argumente übergeben
-                                        output_str = str(result)  # Sicherstellen, dass es ein String ist
+
+                                        # Mit oder ohne Argumente aufrufen je nach Struktur
+                                        if arguments_str.strip() in ['{}', '']:
+                                            result = tool_function()  # Ohne Argumente
+                                        else:
+                                            try:
+                                                arguments = json.loads(arguments_str)
+                                                result = tool_function(**arguments)  # Mit Argumenten
+                                            except (json.JSONDecodeError, TypeError):
+                                                # Fallback ohne Argumente
+                                                result = tool_function()
+
+                                        output_str = str(result)
                                         logger.info(
                                             f"Tool '{function_name}' executed successfully. Result: {output_str}")
 
-                                        # Erzeuge die Antwort direkt als JSON-String
-                                        function_output_json = json.dumps({
+                                        # Für die Zusammenfassung protokollieren
+                                        conversation_tracker.add_tool_usage(function_name, output_str)
+
+                                        # Erzeuge die Antwort
+                                        function_output = {
                                             "type": "conversation.item.create",
                                             "item": {
                                                 "type": "function_call_output",
-                                                "call_id": call_id,
+                                                "call_id": str(call_id),
                                                 "output": output_str
                                             }
-                                        })
+                                        }
 
-                                        # Sende den bereits serialisierten JSON-String
+                                        # Sende das Ergebnis
                                         logger.info(f"Sending function_call_output for {call_id} to OpenAI.")
-                                        await openai_ws.send(function_output_json)
+                                        await openai_ws.send(json.dumps(function_output))
 
-                                        # Neue Antwort anfordern (wichtig, damit die KI das Ergebnis verarbeitet)
-                                        logger.info("Requesting new response from OpenAI after tool execution.")
+                                        # Neue Antwort anfordern
+                                        logger.info("Requesting new response after tool execution.")
                                         await openai_ws.send(json.dumps({"type": "response.create"}))
 
-                                    except TypeError as e:
-                                        logger.error(f"!!! JSON Serialization Error: {e}", exc_info=True)
-                                        # Logge die Werte für Debugging
-                                        logger.error(f"call_id type: {type(call_id)}, value: {repr(call_id)}")
-                                        logger.error(f"output_str type: {type(output_str)}, value: {repr(output_str)}")
                                     except Exception as e:
                                         logger.error(f"Error executing/sending tool '{function_name}': {e}",
                                                      exc_info=True)
                                 else:
-                                    logger.warning(f"Received request for unknown or unnamed tool: {function_name}")
+                                    logger.warning(f"Received request for unknown tool: {function_name}")
                             else:
                                 logger.warning(f"Received function_call_arguments.done for unknown call_id: {call_id}")
+
+                        # ---- UNBEKANNTE EVENT-TYPEN ----
+
+                        if response_type not in KNOWN_RESPONSE_TYPES:
+                            logger.info(f"NEW RESPONSE TYPE: {response_type}")
+                            logger.info(f"UNKNOWN RESPONSE DATA: {response}")
+
+                            # Versuch, Transkripte zu extrahieren
+                            if 'transcript' in response:
+                                transcript = response.get('transcript')
+                                logger.info(f"Found transcript in unknown response: {transcript}")
+                                # Nach Rolle zuordnen
+                                if 'role' in response and response.get('role') == 'user':
+                                    conversation_tracker.add_user_message(transcript)
+                                else:
+                                    conversation_tracker.add_assistant_message(transcript)
 
                 except websockets.exceptions.ConnectionClosed as e:
                     logger.info(f"OpenAI WebSocket connection closed. Code: {e.code}, Reason: {e.reason}")
                 except Exception as e:
                     logger.error(f"Error in send_to_twilio: {e}", exc_info=True)
                 finally:
-                    # Am Ende sicherstellen, dass der Anruf als beendet markiert wird
+                    # Anruf als beendet markieren
                     if conversation_tracker.call_start_time and not conversation_tracker.call_end_time:
                         summary = conversation_tracker.end_call()
                         logger.info(f"Call force-ended in finally block. Summary:\n{summary}")
                     logger.info("send_to_twilio task finished.")
-                    # Schließe Twilio WS NICHT hier, wird von außen gehandhabt
 
             async def handle_speech_started_event():
                 """Behandelt Unterbrechung durch Benutzer."""
