@@ -56,6 +56,91 @@ GET_CURRENT_DATE_TOOL = {
     }
 }
 
+GET_WEATHER_TOOL = {
+    "type": "function",
+    "name": "getWeather",
+    "description": "Aktuelle Temperatur oder Temperatur-Vorhersage für einen Ort",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "city": {
+                "type": "string",
+                "description": "Der Ort von dem der Benutzer das Wetter wissen möchte, z.Bsp. Gera. Die Funktion sollte nur mit dieser Information aufgerufen werden.",
+            },
+            "country": {
+                "type": "string",
+                "description": "Der Ländercode für das Land aus dem das Wetter abgefragt werden soll im zweistelligen Länderformat, z.Bsp. 'DE' für Deutschland oder 'IT' für Italien",
+            },
+            "forecast": {
+                "type": "string",
+                "description": "'no' = aktuelle Temperatur, 'yes' = Vorhersage für 7 Tage. Muss 'no' oder 'yes' sein.",
+        }
+        "required": ["city", "forecast"]    # Keine Parameter nötig
+    }
+}
+
+def getPositionForcity(city: str, country):
+    randomInt = random.randint(2, 3)
+    if randomInt == 1:
+        apiKey = "e0673530c180dc994fba1c54b9462d05"
+    elif randomInt == 2:
+        apiKey = "be66adb3b8df305b7cd9f36ad0ddbfa1"
+    else:
+        apiKey = "1e65b7c071d1d33f6c76ae35235c572a"
+    print("getPositionForcity")
+    print(city + " " + country)
+    conn = http.client.HTTPConnection('api.positionstack.com')
+    params = urllib.parse.urlencode({
+        'access_key': apiKey,
+        'query': city,
+        'country': country,
+        'limit': 1,
+        })
+    
+    conn.request('GET', '/v1/forward?{}'.format(params))
+
+    res = conn.getresponse()
+    data = res.read()
+    dataJson = json.loads(data.decode('utf-8'))
+    return dataJson["data"][0]
+
+def getCurrentWeather(city, country: str = "DE") -> str:
+    print(city + ", " + country)
+    posData = getPositionForcity(city, country)
+    lat = posData["latitude"]
+    lon = posData["longitude"]
+    url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&hourly=temperature_2m&current_weather=true" % (lat, lon)
+    response = requests.get(url)
+    data = json.loads(response.text)
+    print(data)
+    return str(data["current_weather"]["temperature"])
+    
+def getForecastWeather(city, country: str = "DE") -> object:
+    posData = getPositionForcity(city, country)
+    lat = posData["latitude"]
+    lon = posData["longitude"]
+    url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current_weather=false&forecast_days=7&daily=temperature_2m_max,temperature_2m_min,rain_sum&timezone=%s" % (lat, lon, "GMT")
+    print(url)
+    response = requests.get(url)
+    data = response.json()
+
+def getWeather(city, country: str = "DE", forecast: str = "no"):
+    print(city + ", " + country)
+    posData = getPositionForcity(city, country)
+    lat = posData["latitude"]
+    lon = posData["longitude"]
+    if forecast == "no":
+        url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&hourly=temperature_2m&current_weather=true" % (lat, lon)
+        response = requests.get(url)
+        data = json.loads(response.text)
+        print(data)
+        return str(data["current_weather"]["temperature"])
+    url = "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current_weather=false&forecast_days=7&daily=temperature_2m_max,temperature_2m_min,rain_sum&timezone=%s" % (lat, lon, "GMT")
+    print(url)
+    response = requests.get(url)
+    data = response.json()
+    return json.dumps(data)
+
 def get_current_date(*args, **kwargs):
     """Gibt das aktuelle Datum als formatierten String zurück.
     Ignoriert alle übergebenen Parameter."""
@@ -578,7 +663,7 @@ async def send_session_update(openai_ws):
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
             "temperature": 0.8,
-            "tools": [GET_CURRENT_DATE_TOOL]
+            "tools": [GET_CURRENT_DATE_TOOL, GET_WEATHER_TOOL]
         }
     }
 
@@ -605,7 +690,6 @@ async def send_session_update(openai_ws):
         # Logge Typen zur weiteren Diagnose
         logger.info(f"DEBUG: Type of VOICE: {type(VOICE)}")
         logger.info(f"DEBUG: Type of SYSTEM_MESSAGE: {type(SYSTEM_MESSAGE)}")
-        logger.info(f"DEBUG: Type of GET_CURRENT_DATE_TOOL: {type(GET_CURRENT_DATE_TOOL)}")
         # Beende die Verbindung oder handle den Fehler anders
         if openai_ws and openai_ws.state == websockets.protocol.State.OPEN:
             await openai_ws.close(code=1011, reason="JSON serialization error during session update")
